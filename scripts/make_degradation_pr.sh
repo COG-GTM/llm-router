@@ -5,15 +5,17 @@ set -euo pipefail
 # Targets the repo this script is checked out from (via its origin remote).
 # Env overrides: REPO=owner/name, BASE, BRANCH, DRY_RUN=1 (commit only, no push/PR).
 ORIGIN_URL=$(git -C "$(dirname "$0")" remote get-url origin)
-REPO="${REPO:-$(sed -E 's#^.*github\.com[:/]##; s#\.git$##; s#/$##' <<<"$ORIGIN_URL")}"
+ORIGIN_REPO=$(sed -E 's#^.*github\.com[:/]##; s#\.git$##; s#/$##' <<<"$ORIGIN_URL")
+REPO="${REPO:-$ORIGIN_REPO}"
+CLONE_URL="${ORIGIN_URL/"$ORIGIN_REPO"/"$REPO"}"  # same host/protocol/auth, REPO's path
 BASE="${BASE:-main}"
 BRANCH="${BRANCH:-audit/request-logging-$(date +%s)}"
 DRY_RUN="${DRY_RUN:-0}"
 WORK=$(mktemp -d)
 [[ "$DRY_RUN" == 1 ]] || trap 'rm -rf "$WORK"' EXIT
 
-echo "Target: $REPO (base $BASE, branch $BRANCH)"
-git clone -q --branch "$BASE" "$ORIGIN_URL" "$WORK/r"
+echo "Target: $REPO via $CLONE_URL (base $BASE, branch $BRANCH)"
+git clone -q --branch "$BASE" "$CLONE_URL" "$WORK/r"
 cd "$WORK/r"
 git checkout -b "$BRANCH"
 
