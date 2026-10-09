@@ -46,6 +46,7 @@ class UpstreamPool:
         self._ewma: dict[str, float] = {u: 0.0 for u in self._urls}
         self._updated: dict[str, float] = {}
         self._failures: dict[str, int] = {u: 0 for u in self._urls}
+        self._last_ok: dict[str, bool] = {}
         self._client = httpx.AsyncClient(timeout=None, transport=transport)
 
     def score(self, url: str) -> float:
@@ -62,13 +63,15 @@ class UpstreamPool:
         self._updated[url] = self._clock()
 
     def _choose(self) -> list[tuple[str, float]]:
-        # The first attempt explores via decayed scores; the retry goes to the
-        # measured replica with the best raw latency so it is never a probe.
+        # The first attempt explores via decayed scores. The retry prefers a
+        # replica whose last attempt succeeded, then an unmeasured one, then a
+        # replica that just failed; ties break on raw EWMA.
         first = min(self._urls, key=self.score)
         rest = [u for u in self._urls if u != first]
         if not rest:
             return [(first, self._retry_timeout)]
-        retry = min(rest, key=lambda u: (u not in self._updated, self._ewma[u]))
+        tier = {True: 0, None: 1, False: 2}
+        retry = min(rest, key=lambda u: (tier[self._last_ok.get(u)], self._ewma[u]))
         return [(first, self._attempt_timeout), (retry, self._retry_timeout)]
 
     async def _attempt(self, url: str, payload: dict, timeout: float) -> httpx.Response:
@@ -80,12 +83,14 @@ class UpstreamPool:
             doublings = min(self._failures[url], self._max_doublings)
             self._failures[url] += 1
             self._record(url, timeout * self._failure_penalty * 2 ** doublings)
+            self._last_ok[url] = False
             logger.warning("upstream failed url=%s error=%s", url, type(exc).__name__)
             raise
         elapsed = self._clock() - start
         if elapsed <= self._attempt_timeout:
             self._failures[url] = 0
         self._record(url, elapsed)
+        self._last_ok[url] = True
         return resp
 
     async def forward(self, payload: dict) -> tuple[int, dict]:

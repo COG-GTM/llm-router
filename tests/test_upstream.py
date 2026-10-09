@@ -137,7 +137,31 @@ def test_single_replica_gets_full_deadline():
 def test_retry_prefers_measured_replica_over_unmeasured():
     pool = UpstreamPool(urls=URLS, transport=_transport({}, []))
     pool._record("http://u3:9000", 0.1)
+    pool._last_ok["http://u3:9000"] = True
     first, retry = pool._choose()
     assert first[0] == "http://u1:9000"  # unmeasured: explored first
     assert retry[0] == "http://u3:9000"  # retry goes to the proven replica
+    asyncio.run(pool.aclose())
+
+
+def test_retry_prefers_unmeasured_over_failed_replica():
+    urls = [f"http://u{i}:9000" for i in range(1, 5)]
+    pool = UpstreamPool(urls=urls, transport=_transport({}, []))
+    pool._record(urls[0], 1.0)
+    pool._last_ok[urls[0]] = False
+    pool._record(urls[1], 1.0)
+    pool._last_ok[urls[1]] = False
+    first, retry = pool._choose()
+    assert first[0] == "http://u3:9000"
+    assert retry[0] == "http://u4:9000"
+    asyncio.run(pool.aclose())
+
+
+def test_retry_falls_back_to_failed_replica_when_all_failed():
+    pool = UpstreamPool(urls=URLS[:2], transport=_transport({}, []))
+    for u, penalty in ((URLS[0], 1.0), (URLS[1], 2.0)):
+        pool._record(u, penalty)
+        pool._last_ok[u] = False
+    first, retry = pool._choose()
+    assert (first[0], retry[0]) == (URLS[0], URLS[1])
     asyncio.run(pool.aclose())
