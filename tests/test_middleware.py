@@ -5,8 +5,12 @@ from fastapi.testclient import TestClient
 from app import main
 
 
+from app.upstream import upstream_attribution
+
+
 class FakePool:
     async def forward(self, payload):
+        upstream_attribution.get().update(upstream="http://u2:9000", attempts=2)
         return 200, {"completion": "ok"}
 
     async def aclose(self):
@@ -23,6 +27,7 @@ def test_request_id_header_and_log(caplog):
     assert "path=/v1/generate" in line
     assert "status=200" in line
     assert "duration_ms=" in line
+    assert "upstream=http://u2:9000 attempts=2" in line
 
 
 def test_store_initialized_on_state():

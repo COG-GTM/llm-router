@@ -1,6 +1,7 @@
 import asyncio
 
 import httpx
+import pytest
 
 from app.config import upstream_urls
 from app.upstream import UpstreamPool
@@ -20,24 +21,100 @@ def test_upstream_urls_env(monkeypatch):
     assert upstream_urls() == ["http://a:1", "http://b:2"]
 
 
-def _recording_transport(hits: list[str]) -> httpx.MockTransport:
+def _transport(delays: dict[str, float], hits: list[str],
+               fail: set[str] = frozenset()) -> httpx.MockTransport:
+    """Per-host artificial latency; hosts in `fail` refuse connections."""
     async def handler(request: httpx.Request) -> httpx.Response:
-        hits.append(f"{request.url.scheme}://{request.url.host}:{request.url.port}")
-        return httpx.Response(200, json={"completion": "ok"})
+        host = request.url.host
+        hits.append(host)
+        if host in fail:
+            raise httpx.ConnectError("refused", request=request)
+        await asyncio.sleep(delays.get(host, 0))
+        return httpx.Response(200, json={"completion": "ok", "host": host})
 
     return httpx.MockTransport(handler)
 
 
-def test_round_robin_and_passthrough():
+URLS = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+
+
+def test_first_call_uses_first_url_and_passes_through():
     hits: list[str] = []
-    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
-    pool = UpstreamPool(urls=urls, transport=_recording_transport(hits))
+    pool = UpstreamPool(urls=URLS, transport=_transport({}, hits))
 
     async def run():
-        results = [await pool.forward({"prompt": "p"}) for _ in range(4)]
+        result = await pool.forward({"prompt": "p"})
         await pool.aclose()
-        return results
+        return result
 
-    results = asyncio.run(run())
-    assert hits == ["http://u1:9000", "http://u2:9000", "http://u3:9000", "http://u1:9000"]
-    assert all(r == (200, {"completion": "ok"}) for r in results)
+    assert asyncio.run(run()) == (200, {"completion": "ok", "host": "u1"})
+    assert hits == ["u1"]
+
+
+def test_fast_upstream_preferred_over_slow():
+    hits: list[str] = []
+    delays = {"u1": 0.05, "u2": 0.001, "u3": 0.03}
+    pool = UpstreamPool(urls=URLS, transport=_transport(delays, hits))
+
+    async def run():
+        for _ in range(10):
+            await pool.forward({"prompt": "p"})
+        await pool.aclose()
+
+    asyncio.run(run())
+    assert hits[:3] == ["u1", "u2", "u3"]  # unseen replicas are explored first
+    assert hits[3:] == ["u2"] * 7
+
+
+def test_timeout_retries_on_next_best_upstream_and_penalizes():
+    hits: list[str] = []
+    delays = {"u1": 5.0, "u2": 0.001}
+    pool = UpstreamPool(urls=URLS[:2], transport=_transport(delays, hits),
+                        attempt_timeout=0.05)
+
+    async def run():
+        result = await pool.forward({"prompt": "p"})
+        follow_up = await pool.forward({"prompt": "p"})
+        await pool.aclose()
+        return result, follow_up
+
+    result, follow_up = asyncio.run(run())
+    assert result == (200, {"completion": "ok", "host": "u2"})
+    assert follow_up[1]["host"] == "u2"
+    assert hits == ["u1", "u2", "u2"]
+    assert pool.score("http://u1:9000") > pool.score("http://u2:9000")
+
+
+def test_connection_error_retries_once_then_propagates():
+    hits: list[str] = []
+    pool = UpstreamPool(urls=URLS, transport=_transport({}, hits, fail={"u1", "u2", "u3"}))
+
+    async def run():
+        try:
+            with pytest.raises(httpx.ConnectError):
+                await pool.forward({"prompt": "p"})
+        finally:
+            await pool.aclose()
+
+    asyncio.run(run())
+    assert hits == ["u1", "u2"]
+
+
+def test_ewma_recovers_over_time():
+    now = [0.0]
+    pool = UpstreamPool(urls=URLS[:2], transport=_transport({}, []),
+                        decay_half_life=5.0, clock=lambda: now[0])
+    slow, fast = URLS[:2]
+    pool._record(slow, 2.0)
+    pool._record(fast, 0.15)
+    assert pool._choose()[0][0] == fast
+
+    now[0] = 20.0  # four half-lives idle: 2.0s decays to 0.125s
+    assert pool.score(slow) == pytest.approx(0.125)
+    for _ in range(10):  # meanwhile the fast replica keeps serving traffic
+        pool._record(fast, 0.15)
+    assert pool._choose()[0][0] == slow  # idle replica gets probed again
+
+    pool._record(slow, 0.1)  # healthy probe keeps it in rotation
+    assert pool.score(slow) < pool.score(fast)
+    asyncio.run(pool.aclose())
