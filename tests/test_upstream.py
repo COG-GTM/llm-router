@@ -118,3 +118,26 @@ def test_ewma_recovers_over_time():
     pool._record(slow, 0.1)  # healthy probe keeps it in rotation
     assert pool.score(slow) < pool.score(fast)
     asyncio.run(pool.aclose())
+
+
+def test_single_replica_gets_full_deadline():
+    hits: list[str] = []
+    pool = UpstreamPool(urls=URLS[:1], transport=_transport({"u1": 0.1}, hits),
+                        attempt_timeout=0.05, retry_timeout=1.0)
+
+    async def run():
+        result = await pool.forward({"prompt": "p"})
+        await pool.aclose()
+        return result
+
+    assert asyncio.run(run())[0] == 200
+    assert hits == ["u1"]
+
+
+def test_retry_prefers_measured_replica_over_unmeasured():
+    pool = UpstreamPool(urls=URLS, transport=_transport({}, []))
+    pool._record("http://u3:9000", 0.1)
+    first, retry = pool._choose()
+    assert first[0] == "http://u1:9000"  # unmeasured: explored first
+    assert retry[0] == "http://u3:9000"  # retry goes to the proven replica
+    asyncio.run(pool.aclose())

@@ -63,13 +63,13 @@ class UpstreamPool:
 
     def _choose(self) -> list[tuple[str, float]]:
         # The first attempt explores via decayed scores; the retry goes to the
-        # replica with the best observed latency so it is never a probe.
+        # measured replica with the best raw latency so it is never a probe.
         first = min(self._urls, key=self.score)
-        attempts = [(first, self._attempt_timeout)]
         rest = [u for u in self._urls if u != first]
-        if rest:
-            attempts.append((min(rest, key=lambda u: self._ewma[u]), self._retry_timeout))
-        return attempts
+        if not rest:
+            return [(first, self._retry_timeout)]
+        retry = min(rest, key=lambda u: (u not in self._updated, self._ewma[u]))
+        return [(first, self._attempt_timeout), (retry, self._retry_timeout)]
 
     async def _attempt(self, url: str, payload: dict, timeout: float) -> httpx.Response:
         start = self._clock()
