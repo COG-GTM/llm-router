@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import httpx
 from fastapi.testclient import TestClient
@@ -266,3 +267,139 @@ def test_generate_cache_bounded_at_1000_entries():
     assert cache.maxsize == 1000
     assert len(cache) == 1000
     assert len(pool.calls) == 1002
+
+
+def _seed(pool: UpstreamPool, ewma: dict[str, float]) -> None:
+    now = time.monotonic()
+    for url, latency in ewma.items():
+        pool._ewma[url] = latency
+        pool._sampled_at[url] = now
+
+
+def _hedge_transport(delays: dict[str, float], hits: list[str], cancelled: list[str],
+                     statuses: dict[str, int] | None = None,
+                     errors: set[str] | None = None) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        hits.append(host)
+        try:
+            await asyncio.sleep(delays[host])
+        except asyncio.CancelledError:
+            cancelled.append(host)
+            raise
+        if host in (errors or set()):
+            raise httpx.ConnectError("down", request=request)
+        return httpx.Response((statuses or {}).get(host, 200), json={"completion": host})
+
+    return httpx.MockTransport(handler)
+
+
+HEDGE_URLS = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+
+
+def _run_hedged(delays, ewma, hedge_delay=0.05, **kw):
+    hits: list[str] = []
+    cancelled: list[str] = []
+    transport = _hedge_transport(delays, hits, cancelled, **kw)
+    pool = UpstreamPool(urls=HEDGE_URLS, transport=transport, hedge_delay=hedge_delay)
+    _seed(pool, ewma)
+
+    async def run():
+        start = asyncio.get_running_loop().time()
+        try:
+            result = await pool.forward({"prompt": "p"})
+        finally:
+            elapsed = asyncio.get_running_loop().time() - start
+            await pool.aclose()
+        return result, elapsed
+
+    result, elapsed = asyncio.run(run())
+    return pool, result, elapsed, hits, cancelled
+
+
+def test_hedge_fires_after_delay_on_slow_primary():
+    pool, result, elapsed, hits, _cancelled = _run_hedged(
+        {"u1": 1.0, "u2": 0.01, "u3": 0.01},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3})
+    assert hits == ["u1", "u2"]
+    assert result == (200, {"completion": "u2"})
+    assert 0.05 <= elapsed < 0.5
+    assert (pool.forwarded, pool.hedges, pool.hedge_wins) == (1, 1, 1)
+
+
+def test_no_hedge_when_primary_is_fast():
+    pool, result, _, hits, cancelled = _run_hedged(
+        {"u1": 0.0, "u2": 0.0, "u3": 0.0},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3},
+        hedge_delay=0.2)
+    assert hits == ["u1"]
+    assert cancelled == []
+    assert result == (200, {"completion": "u1"})
+    assert (pool.hedges, pool.hedge_wins) == (0, 0)
+
+
+def test_hedge_loser_is_cancelled_and_recorded_as_slow():
+    pool, result, _, _hits, cancelled = _run_hedged(
+        {"u1": 1.0, "u2": 0.01, "u3": 0.01},
+        {"http://u1:9000": 0.01, "http://u2:9000": 0.02, "http://u3:9000": 0.3})
+    assert cancelled == ["u1"]
+    assert result == (200, {"completion": "u2"})
+    # loser's elapsed time (>= hedge delay) is folded into its EWMA
+    assert pool._ewma["http://u1:9000"] > 0.01
+    assert pool._ewma["http://u2:9000"] < pool._ewma["http://u1:9000"]
+
+
+def test_primary_wins_if_it_finishes_before_hedge():
+    pool, result, _, hits, cancelled = _run_hedged(
+        {"u1": 0.08, "u2": 1.0, "u3": 1.0},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3})
+    assert hits == ["u1", "u2"]
+    assert cancelled == ["u2"]
+    assert result == (200, {"completion": "u1"})
+    assert (pool.hedges, pool.hedge_wins) == (1, 0)
+
+
+def test_hedge_contract_prefers_success_over_5xx():
+    _pool, result, _, hits, _cancelled = _run_hedged(
+        {"u1": 0.15, "u2": 0.0, "u3": 0.0},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3},
+        statuses={"u2": 503})
+    assert hits == ["u1", "u2"]
+    assert result == (200, {"completion": "u1"})
+    assert isinstance(result[0], int) and isinstance(result[1], dict)
+
+
+def test_hedge_contract_returns_5xx_when_both_fail():
+    _, result, _, _, _ = _run_hedged(
+        {"u1": 0.1, "u2": 0.0, "u3": 0.0},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3},
+        statuses={"u1": 503, "u2": 502})
+    assert result == (502, {"completion": "u2"})
+
+
+def test_hedge_survives_primary_transport_error():
+    _, result, _, hits, _ = _run_hedged(
+        {"u1": 0.1, "u2": 0.0, "u3": 0.0},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3},
+        errors={"u1"}, statuses={"u2": 503})
+    assert hits == ["u1", "u2"]
+    assert result == (503, {"completion": "u2"})
+
+
+def test_hedging_disabled_with_none():
+    pool, result, _, hits, _cancelled = _run_hedged(
+        {"u1": 0.1, "u2": 0.0, "u3": 0.0},
+        {"http://u1:9000": 0.1, "http://u2:9000": 0.2, "http://u3:9000": 0.3},
+        hedge_delay=None)
+    assert hits == ["u1"]
+    assert result == (200, {"completion": "u1"})
+    assert pool.hedges == 0
+
+
+def test_hedge_loser_never_lowers_its_ewma():
+    pool, result, _, _, cancelled = _run_hedged(
+        {"u1": 5.0, "u2": 0.01, "u3": 0.01},
+        {"http://u1:9000": 2.0, "http://u2:9000": 3.0, "http://u3:9000": 4.0})
+    assert cancelled == ["u1"]
+    assert result == (200, {"completion": "u2"})
+    assert pool._ewma["http://u1:9000"] == 2.0
