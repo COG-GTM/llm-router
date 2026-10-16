@@ -22,7 +22,7 @@ async def chat(body: ChatRequest, request: Request):
 
     start = time.monotonic()
     status, upstream = await request.app.state.pool.forward(
-        {"prompt": prompt, "max_tokens": body.max_tokens}
+        {"prompt": prompt, "max_tokens": body.max_tokens}, key=body.conversation_id
     )
     latency_ms = int((time.monotonic() - start) * 1000)
 
