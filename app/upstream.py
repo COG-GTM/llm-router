@@ -90,8 +90,17 @@ class UpstreamPool:
                 self._mark_failed(url)
                 last = (resp.status_code, _json(resp))
                 continue
+            if resp.status_code < 300:
+                try:
+                    body = resp.json()
+                except ValueError:
+                    self._mark_failed(url)
+                    last = (502, {"detail": "invalid upstream response"})
+                    continue
+            else:
+                body = _json(resp)
             self._record_latency(url, time.monotonic() - start)
-            return resp.status_code, _json(resp)
+            return resp.status_code, body
         return last
 
     async def aclose(self) -> None:

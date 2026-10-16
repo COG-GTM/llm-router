@@ -160,3 +160,26 @@ def test_4xx_is_passed_through_without_failover():
     pool = UpstreamPool(urls=URLS, transport=httpx.MockTransport(handler))
     assert _run(pool, [None]) == [(422, {"detail": "bad request"})]
     assert len(hits) == 1
+
+
+def test_invalid_json_success_fails_over():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(_origin(request))
+        if len(hits) == 1:
+            return httpx.Response(200, text="service restarting")
+        return httpx.Response(200, json={"completion": "ok"})
+
+    pool = UpstreamPool(urls=URLS, transport=httpx.MockTransport(handler))
+    assert _run(pool, ["conv-1"]) == [(200, {"completion": "ok"})]
+    assert len(hits) == 2 and hits[0] != hits[1]
+
+
+def test_invalid_json_everywhere_returns_502():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    pool = UpstreamPool(urls=URLS, transport=httpx.MockTransport(handler))
+    [(status, body)] = _run(pool, [None])
+    assert status == 502 and "detail" in body
