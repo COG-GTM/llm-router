@@ -1,15 +1,21 @@
+import asyncio
+
+import httpx
 from fastapi.testclient import TestClient
 
 from app import main
+from app.upstream import UpstreamPool
 
 
 class FakePool:
     def __init__(self, status=200):
         self.status = status
         self.calls: list[dict] = []
+        self.keys: list[str | None] = []
 
-    async def forward(self, payload):
+    async def forward(self, payload, key=None):
         self.calls.append(payload)
+        self.keys.append(key)
         return self.status, (
             {"completion": "mock answer", "model": "mock-large",
              "usage": {"prompt_tokens": 5, "completion_tokens": 2}}
@@ -46,6 +52,7 @@ def test_chat_roundtrip_persists_and_titles():
     assert len(pool.calls) == 1
     assert pool.calls[0]["prompt"].endswith("User: What is a hash map?\nAssistant:")
     assert pool.calls[0]["max_tokens"] == 64
+    assert pool.keys == [cid]
 
 
 def test_chat_persists_both_turns_and_uses_history():
@@ -91,3 +98,25 @@ def test_chat_upstream_error_passthrough_and_no_persist():
     c.__exit__(None, None, None)
     assert resp.status_code == 503
     assert msgs == []  # failed exchanges are not persisted
+
+
+def test_chat_latency_includes_failover_retries():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "bad":
+            await asyncio.sleep(0.2)
+            return httpx.Response(503, json={"detail": "overloaded"})
+        return httpx.Response(200, json={"completion": "ok", "model": "m"})
+
+    pool = UpstreamPool(urls=["http://bad:1", "http://good:1"],
+                        transport=httpx.MockTransport(handler))
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    # Force the failing replica to be tried first for this conversation.
+    pool._ring_order = lambda key: ["http://bad:1", "http://good:1"]
+
+    resp = c.post("/v1/chat", json={"conversation_id": cid, "message": "hi"})
+    c.__exit__(None, None, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["message"]["content"] == "ok"
+    assert resp.json()["latency_ms"] >= 200
