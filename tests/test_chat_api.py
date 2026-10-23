@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -73,6 +74,21 @@ def test_chat_forwards_non_default_max_tokens_to_pool():
     c.__exit__(None, None, None)
 
     assert pool.calls[0]["max_tokens"] == 16
+
+
+@pytest.mark.parametrize("bad", [0, -3, 1025])
+def test_chat_rejects_out_of_range_max_tokens(bad):
+    pool = FakePool()
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+
+    resp = c.post("/v1/chat", json={"conversation_id": cid, "message": "hi", "max_tokens": bad})
+    msgs = c.get(f"/v1/conversations/{cid}/messages").json()
+    c.__exit__(None, None, None)
+
+    assert resp.status_code == 422
+    assert pool.calls == []
+    assert msgs == []
 
 
 def test_chat_unknown_conversation_404():

@@ -43,6 +43,10 @@ make e2e     # run the Playwright end-to-end UI tests
 | GET    | `/v1/conversations/{id}/messages?limit=&before=` | List messages in a conversation, with optional pagination |
 | GET    | `/v1/conversations/{id}/export`              | Download the conversation as a markdown transcript |
 
+`/v1/generate` and `/v1/chat` accept an optional `max_tokens` (default `64`). It must be between `1` and
+`MAX_TOKENS_LIMIT` (env, default `1024`); anything outside that range is rejected with `422` rather than
+clamped, so a client never silently gets a shorter generation than it asked for.
+
 ## Layout
 
 - `app/` — FastAPI gateway: generate/chat/info routes, conversation store, markdown export, request logging middleware

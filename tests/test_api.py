@@ -1,4 +1,5 @@
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -49,3 +50,22 @@ def test_generate_validates_prompt():
     r = c.post("/v1/generate", json={})
     c.__exit__(None, None, None)
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1025])
+def test_generate_rejects_out_of_range_max_tokens(bad):
+    pool = FakePool()
+    c = client_with(pool)
+    r = c.post("/v1/generate", json={"prompt": "hi", "max_tokens": bad})
+    c.__exit__(None, None, None)
+    assert r.status_code == 422
+    assert pool.calls == []
+
+
+def test_generate_accepts_max_tokens_at_limit():
+    pool = FakePool()
+    c = client_with(pool)
+    r = c.post("/v1/generate", json={"prompt": "hi", "max_tokens": 1024})
+    c.__exit__(None, None, None)
+    assert r.status_code == 200
+    assert pool.calls == [{"prompt": "hi", "max_tokens": 1024}]

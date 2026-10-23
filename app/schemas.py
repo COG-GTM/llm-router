@@ -1,15 +1,33 @@
-from pydantic import BaseModel, model_validator
+from typing import Annotated
+
+from pydantic import AfterValidator, BaseModel, Field, model_validator
+
+from .config import DEFAULT_MAX_TOKENS, max_tokens_limit
+
+
+def _check_max_tokens_limit(value: int) -> int:
+    # Out-of-range values are rejected (422) rather than clamped: silently
+    # shortening a requested generation would hand the client a truncated
+    # completion with no signal why. The limit is read per request so
+    # MAX_TOKENS_LIMIT can be tuned without code changes.
+    limit = max_tokens_limit()
+    if value > limit:
+        raise ValueError(f"max_tokens must be <= {limit}")
+    return value
+
+
+MaxTokens = Annotated[int, Field(ge=1), AfterValidator(_check_max_tokens_limit)]
 
 
 class GenerateRequest(BaseModel):
     prompt: str
-    max_tokens: int = 64
+    max_tokens: MaxTokens = DEFAULT_MAX_TOKENS
 
 
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
-    max_tokens: int = 64
+    max_tokens: MaxTokens = DEFAULT_MAX_TOKENS
     model: str | None = None
 
 

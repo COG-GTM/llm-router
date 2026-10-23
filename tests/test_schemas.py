@@ -80,3 +80,34 @@ def test_info_response_shape():
     assert info.models == ["default"]
     with pytest.raises(ValidationError):
         InfoResponse(name="llm-router", version="0.1.0", uptime_s=1.5)
+
+
+@pytest.mark.parametrize("model,kwargs", [
+    (GenerateRequest, {"prompt": "hi"}),
+    (ChatRequest, {"conversation_id": "c1", "message": "hi"}),
+])
+@pytest.mark.parametrize("bad", [0, -1, 1025, 10**9])
+def test_max_tokens_out_of_range_rejected(model, kwargs, bad):
+    with pytest.raises(ValidationError):
+        model(**kwargs, max_tokens=bad)
+
+
+@pytest.mark.parametrize("ok", [1, 64, 1024])
+def test_max_tokens_bounds_inclusive(ok):
+    assert GenerateRequest(prompt="hi", max_tokens=ok).max_tokens == ok
+    assert ChatRequest(conversation_id="c1", message="hi", max_tokens=ok).max_tokens == ok
+
+
+def test_max_tokens_limit_configurable(monkeypatch):
+    monkeypatch.setenv("MAX_TOKENS_LIMIT", "128")
+    assert GenerateRequest(prompt="hi", max_tokens=128).max_tokens == 128
+    with pytest.raises(ValidationError):
+        GenerateRequest(prompt="hi", max_tokens=129)
+
+
+@pytest.mark.parametrize("raw", ["lots", "", "0", "-5"])
+def test_max_tokens_limit_invalid_env_falls_back_to_default(monkeypatch, raw):
+    monkeypatch.setenv("MAX_TOKENS_LIMIT", raw)
+    assert GenerateRequest(prompt="hi", max_tokens=1024).max_tokens == 1024
+    with pytest.raises(ValidationError):
+        GenerateRequest(prompt="hi", max_tokens=1025)
