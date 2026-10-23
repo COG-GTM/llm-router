@@ -111,6 +111,8 @@ class UpstreamPool:
         return status, copy.deepcopy(body)
 
     async def _fetch(self, key: _CacheKey, payload: dict) -> tuple[int, dict]:
+        # _post already fails over across every backend, so coalesced callers are
+        # never pinned to one failing replica.
         status, body = await self._post(payload)
         if status == 200:
             self._cache.put(key, body)
@@ -142,13 +144,18 @@ class UpstreamPool:
             timeout = self._final_timeout if last else self._attempt_timeout
             started = time.monotonic()
             try:
-                resp = await self._client.post(f"{url}/v1/completions", json=payload,
-                                               timeout=timeout)
-            except httpx.TimeoutException:
+                # asyncio.timeout bounds total elapsed time: httpx's own timeout is
+                # per-phase and resets on each received chunk, so a replica dribbling
+                # the response would otherwise never fail over.
+                async with asyncio.timeout(timeout):
+                    resp = await self._client.post(f"{url}/v1/completions", json=payload,
+                                                   timeout=timeout)
+            except (httpx.TimeoutException, TimeoutError):
                 self._observe(idx, True)
                 result = (504, {"detail": "upstream timeout"})
                 continue
-            except httpx.TransportError:
+            except httpx.RequestError:
+                # Transport errors plus decode failures (e.g. corrupt gzip body).
                 self._observe(idx, True)
                 result = (502, {"detail": "upstream unavailable"})
                 continue
