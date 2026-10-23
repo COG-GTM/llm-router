@@ -46,6 +46,8 @@ if os.path.isdir(_DIST):
 
 
 # --- request audit logging (compliance) ---
+import asyncio as _asyncio
+
 from starlette.requests import Request as _AuditRequest
 
 from .audit import write_audit as _write_audit
@@ -54,7 +56,7 @@ from .audit import write_audit as _write_audit
 @app.middleware("http")
 async def _audit_middleware(request: _AuditRequest, call_next):
     response = await call_next(request)
-    _write_audit({
+    await _asyncio.to_thread(_write_audit, {
         "path": request.url.path,
         "method": request.method,
         "client": str(request.client),
