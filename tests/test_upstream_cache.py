@@ -122,6 +122,30 @@ def test_ttl_expiry_and_lru_eviction(monkeypatch):
     assert [h["prompt"] for h in hits] == ["a", "b", "c", "b", "b"]
 
 
+def test_expired_entries_evicted_before_live_ones(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("app.cache.time.monotonic", lambda: now[0])
+    hits: list[dict] = []
+    pool = _pool(hits, cache=ResponseCache(max_size=2, ttl_s=10))
+
+    async def call(prompt):
+        await pool.forward({"prompt": prompt, "max_tokens": 8})
+
+    async def run():
+        await call("a")  # t=0, expires t=10
+        now[0] = 5
+        await call("b")  # expires t=15
+        now[0] = 9
+        await call("a")  # hit; "a" is most recent but expires first
+        now[0] = 11
+        await call("c")  # must drop expired "a", not live "b"
+        await call("b")  # still cached
+        await pool.aclose()
+
+    asyncio.run(run())
+    assert [h["prompt"] for h in hits] == ["a", "b", "c"]
+
+
 def test_disabled_cache_always_forwards():
     hits: list[dict] = []
     pool = _pool(hits, cache=ResponseCache(max_size=0))

@@ -65,5 +65,9 @@ class ResponseCache:
     def _put(self, key: str, body: dict) -> None:
         self._entries[key] = (time.monotonic() + self.ttl_s, copy.deepcopy(body))
         self._entries.move_to_end(key)
+        if len(self._entries) > self.max_size:
+            now = time.monotonic()
+            for k in [k for k, (exp, _) in self._entries.items() if exp <= now]:
+                del self._entries[k]
         while len(self._entries) > self.max_size:
             self._entries.popitem(last=False)
