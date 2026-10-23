@@ -120,3 +120,64 @@ def test_in_flight_returns_to_zero_after_errors():
     assert any(isinstance(r, httpx.ConnectError) for r in results)
     assert (503, {"detail": "overloaded"}) in results
     assert [b.in_flight for b in pool._backends] == [0, 0]
+
+
+def test_hung_unmeasured_backend_does_not_absorb_traffic():
+    hits: list[str] = []
+    release = asyncio.Event()
+    hung_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = _host(request)
+        hits.append(host)
+        if host == "http://u2:9000":
+            hung_started.set()
+            await release.wait()
+        else:
+            await asyncio.sleep(0.01)
+        return httpx.Response(200, json={"completion": "ok"})
+
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        await pool.forward({"prompt": "p"})
+        hung = asyncio.create_task(pool.forward({"prompt": "p"}))
+        await hung_started.wait()
+        for _ in range(8):
+            await pool.forward({"prompt": "p"})
+        release.set()
+        await hung
+        await pool.aclose()
+
+    asyncio.run(run())
+    assert hits.count("http://u2:9000") == 1
+
+
+def test_fast_failures_are_penalized():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = _host(request)
+        hits.append(host)
+        if host == "http://u1:9000":
+            return httpx.Response(429, json={"detail": "rate limited"})
+        if host == "http://u2:9000":
+            return httpx.Response(200, text="not json")
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"completion": "ok"})
+
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        for _ in range(6):
+            try:
+                await pool.forward({"prompt": "p"})
+            except ValueError:
+                pass
+        await pool.aclose()
+
+    asyncio.run(run())
+    assert hits[:3] == urls
+    assert set(hits[3:]) == {"http://u3:9000"}

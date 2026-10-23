@@ -6,8 +6,7 @@ from .config import upstream_urls
 
 # Weight of the newest latency sample in each backend's moving average.
 _EWMA_ALPHA = 0.2
-# Assumed latency for a backend with no samples yet, and the floor for all
-# estimates, so an untried backend is probed but in-flight load still counts.
+# Floor for all latency estimates, so in-flight load always counts.
 _MIN_LATENCY_S = 0.001
 # Backends whose cost is within this factor of the cheapest are treated as
 # equivalent and picked in round-robin order, keeping selection stable.
@@ -15,6 +14,7 @@ _TIE_TOLERANCE = 1.25
 # Latency charged for a failed request so a backend that fails fast never
 # looks attractive.
 _ERROR_PENALTY_S = 1.0
+_RATE_LIMITED = 429
 
 
 class _Backend:
@@ -25,8 +25,8 @@ class _Backend:
         self.in_flight = 0
         self.ewma: float | None = None
 
-    def cost(self) -> float:
-        latency = max(self.ewma or 0.0, _MIN_LATENCY_S)
+    def cost(self, prior: float) -> float:
+        latency = max(prior if self.ewma is None else self.ewma, _MIN_LATENCY_S)
         return latency * (self.in_flight + 1)
 
     def observe(self, seconds: float) -> None:
@@ -53,8 +53,12 @@ class UpstreamPool:
     def _pick(self) -> _Backend:
         n = len(self._backends)
         order = [self._backends[(self._next + i) % n] for i in range(n)]
-        best = min(b.cost() for b in order)
-        chosen = next(b for b in order if b.cost() <= best * _TIE_TOLERANCE)
+        # Untried backends are assumed as fast as the best measured one, so
+        # they get probed but pending probes still count as load.
+        prior = min((b.ewma for b in order if b.ewma is not None), default=0.0)
+        costs = [b.cost(prior) for b in order]
+        best = min(costs)
+        chosen = next(b for b, c in zip(order, costs) if c <= best * _TIE_TOLERANCE)
         self._next = (self._backends.index(chosen) + 1) % n
         return chosen
 
@@ -65,8 +69,9 @@ class UpstreamPool:
         failed = True
         try:
             resp = await self._client.post(f"{backend.url}/v1/completions", json=payload)
-            failed = resp.status_code >= 500
-            return resp.status_code, resp.json()
+            body = resp.json()
+            failed = resp.status_code >= 500 or resp.status_code == _RATE_LIMITED
+            return resp.status_code, body
         finally:
             backend.in_flight -= 1
             elapsed = time.monotonic() - start
