@@ -1,0 +1,222 @@
+{
+  "task": 1,
+  "branch": "devin/1761237800-task1-upstream-resilience",
+  "commit_sha": "35ff581458e98464ac5a15b2a90541c2ece0fd30",
+  "baseline_sha": "8eaf85dd5120a174f17398ec59648b411d8b341a",
+  "harness": "generate",
+  "script": "bench/k6.js",
+  "runs_per_side": 3,
+  "summary": {
+    "p50_ms": {
+      "baseline": 157.0,
+      "after": 138.0,
+      "abs_ms": 19.0,
+      "pct_improvement": 12.1
+    },
+    "p95_ms": {
+      "baseline": 2964.0,
+      "after": 392.0,
+      "abs_ms": 2572.0,
+      "pct_improvement": 86.8
+    },
+    "p99_ms": {
+      "baseline": 4162.0,
+      "after": 618.0,
+      "abs_ms": 3544.0,
+      "pct_improvement": 85.2
+    },
+    "error_rate_pct": {
+      "baseline": 0.0,
+      "after": 0.0
+    },
+    "checks_pct": {
+      "baseline": 100.0,
+      "after": 100.0
+    }
+  },
+  "pytest": "pass",
+  "e2e": "pass",
+  "notes": "UpstreamPool: explicit httpx.Timeout (250 ms per attempt, 30 s final attempt), failover on timeout/connect error/5xx bounded to len(urls) attempts, least-loaded selection (latency EWMA x (in_flight+1), near-ties round-robin), one in-flight probe per unmeasured backend, failed attempts priced >=1 s, passive circuit breaker (3 consecutive failures -> exponential cool-down) and stale-backend reprobe every 10 s. Mock latency is independent of prompt size; gains come from cutting healthy-replica spikes at 250 ms and keeping first attempts off replica 3.",
+  "baseline": {
+    "harness": "generate",
+    "script": "bench/k6.js",
+    "runs": [
+      {
+        "p50_ms": 157.0,
+        "p95_ms": 2952.0,
+        "p99_ms": 4081.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          157 ms\n  p95          2952 ms\n  p99          4081 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 159.0,
+        "p95_ms": 2964.0,
+        "p99_ms": 4208.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          159 ms\n  p95          2964 ms\n  p99          4208 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1800,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 157.0,
+        "p95_ms": 3005.0,
+        "p99_ms": 4162.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          157 ms\n  p95          3005 ms\n  p99          4162 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1800,
+            "fails": 0
+          }
+        }
+      }
+    ],
+    "median": {
+      "p50_ms": 157.0,
+      "p95_ms": 2964.0,
+      "p99_ms": 4162.0,
+      "error_rate_pct": 0.0,
+      "checks_pct": 100.0
+    }
+  },
+  "after": {
+    "harness": "generate",
+    "script": "bench/k6.js",
+    "runs": [
+      {
+        "p50_ms": 139.0,
+        "p95_ms": 392.0,
+        "p99_ms": 417.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          139 ms\n  p95          392 ms\n  p99          417 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 138.0,
+        "p95_ms": 394.0,
+        "p99_ms": 618.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          138 ms\n  p95          394 ms\n  p99          618 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 138.0,
+        "p95_ms": 390.0,
+        "p99_ms": 629.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          138 ms\n  p95          390 ms\n  p99          629 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      }
+    ],
+    "median": {
+      "p50_ms": 138.0,
+      "p95_ms": 392.0,
+      "p99_ms": 618.0,
+      "error_rate_pct": 0.0,
+      "checks_pct": 100.0
+    }
+  }
+}

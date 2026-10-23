@@ -1,0 +1,198 @@
+{
+  "task": 1,
+  "branch": "devin/1761237800-task1-upstream-resilience",
+  "commit_sha": "35ff581458e98464ac5a15b2a90541c2ece0fd30",
+  "baseline_sha": "8eaf85dd5120a174f17398ec59648b411d8b341a",
+  "harness": "chat",
+  "script": "bench/k6_chat.js",
+  "runs_per_side": 3,
+  "summary": {
+    "p50_ms": {
+      "baseline": 158.0,
+      "after": 143.0,
+      "abs_ms": 15.0,
+      "pct_improvement": 9.5
+    },
+    "p95_ms": {
+      "baseline": 3062.0,
+      "after": 396.0,
+      "abs_ms": 2666.0,
+      "pct_improvement": 87.1
+    },
+    "p99_ms": {
+      "baseline": 4172.0,
+      "after": 617.0,
+      "abs_ms": 3555.0,
+      "pct_improvement": 85.2
+    },
+    "error_rate_pct": {
+      "baseline": 0.0,
+      "after": 0.0
+    },
+    "checks_pct": {
+      "baseline": 100.0,
+      "after": 100.0
+    }
+  },
+  "pytest": "pass",
+  "e2e": "pass",
+  "notes": "UpstreamPool: explicit httpx.Timeout (250 ms per attempt, 30 s final attempt), failover on timeout/connect error/5xx bounded to len(urls) attempts, least-loaded selection (latency EWMA x (in_flight+1), near-ties round-robin), one in-flight probe per unmeasured backend, failed attempts priced >=1 s, passive circuit breaker (3 consecutive failures -> exponential cool-down) and stale-backend reprobe every 10 s. Mock latency is independent of prompt size; gains come from cutting healthy-replica spikes at 250 ms and keeping first attempts off replica 3. (chat harness)",
+  "baseline": {
+    "harness": "chat",
+    "script": "bench/k6_chat.js",
+    "runs": [
+      {
+        "p50_ms": 158.0,
+        "p95_ms": 2958.0,
+        "p99_ms": 4190.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== chat bench summary (60s @ 30 rps, 20 convs, 10 seed turns) ===\n  p50          158 ms\n  p95          2958 ms\n  p99          4190 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "assistant message non-empty": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "latency_ms reported": {
+            "passes": 1800,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 158.0,
+        "p95_ms": 3066.0,
+        "p99_ms": 4172.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== chat bench summary (60s @ 30 rps, 20 convs, 10 seed turns) ===\n  p50          158 ms\n  p95          3066 ms\n  p99          4172 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "assistant message non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "latency_ms reported": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 160.0,
+        "p95_ms": 3062.0,
+        "p99_ms": 4130.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== chat bench summary (60s @ 30 rps, 20 convs, 10 seed turns) ===\n  p50          160 ms\n  p95          3062 ms\n  p99          4130 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "assistant message non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "latency_ms reported": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      }
+    ],
+    "median": {
+      "p50_ms": 158.0,
+      "p95_ms": 3062.0,
+      "p99_ms": 4172.0,
+      "error_rate_pct": 0.0,
+      "checks_pct": 100.0
+    }
+  },
+  "after": {
+    "harness": "chat",
+    "script": "bench/k6_chat.js",
+    "runs": [
+      {
+        "p50_ms": 144.0,
+        "p95_ms": 398.0,
+        "p99_ms": 625.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== chat bench summary (60s @ 30 rps, 20 convs, 10 seed turns) ===\n  p50          144 ms\n  p95          398 ms\n  p99          625 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "assistant message non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "latency_ms reported": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 143.0,
+        "p95_ms": 396.0,
+        "p99_ms": 422.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== chat bench summary (60s @ 30 rps, 20 convs, 10 seed turns) ===\n  p50          143 ms\n  p95          396 ms\n  p99          422 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "assistant message non-empty": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "latency_ms reported": {
+            "passes": 1800,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 140.0,
+        "p95_ms": 396.0,
+        "p99_ms": 617.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== chat bench summary (60s @ 30 rps, 20 convs, 10 seed turns) ===\n  p50          140 ms\n  p95          396 ms\n  p99          617 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "assistant message non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "latency_ms reported": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      }
+    ],
+    "median": {
+      "p50_ms": 143.0,
+      "p95_ms": 396.0,
+      "p99_ms": 617.0,
+      "error_rate_pct": 0.0,
+      "checks_pct": 100.0
+    }
+  }
+}
