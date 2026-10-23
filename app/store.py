@@ -1,8 +1,14 @@
 """SQLite persistence for conversations and messages."""
+import functools
+import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
+from collections import deque
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -35,11 +41,41 @@ def _conversation_dict(row: sqlite3.Row) -> dict:
     return conversation
 
 
+def new_message(conversation_id: str, role: str, content: str,
+                latency_ms: int | None = None) -> dict:
+    """Build a message (id and created_at assigned now) without persisting it."""
+    return {
+        "id": uuid.uuid4().hex,
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content,
+        "latency_ms": latency_ms,
+        "created_at": time.time(),
+    }
+
+
+def _synchronized(method):
+    """Run a Store method under the store lock, after applying deferred writes.
+
+    The connection is shared across threads (`asyncio.to_thread`, background
+    tasks), so every access is serialized; draining the deferred-write queue
+    first means callers always read their own (deferred) writes.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            self._drain_pending()
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Store:
     def __init__(self, path: str):
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        self._lock = threading.RLock()
+        self._pending: deque[tuple[list[dict], str | None]] = deque()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -66,6 +102,7 @@ class Store:
 
     # -- conversations -----------------------------------------------------
 
+    @_synchronized
     def create_conversation(self, title: str = "New conversation") -> dict:
         now = time.time()
         conversation = {
@@ -83,6 +120,7 @@ class Store:
         self._conn.commit()
         return conversation
 
+    @_synchronized
     def list_conversations(self, q: str | None = None) -> list[dict]:
         # Pinned conversations always float to the top; within each group,
         # most-recently-updated first.
@@ -101,12 +139,14 @@ class Store:
             rows = self._conn.execute("SELECT * FROM conversations" + order_by).fetchall()
         return [_conversation_dict(r) for r in rows]
 
+    @_synchronized
     def get_conversation(self, conversation_id: str) -> dict | None:
         row = self._conn.execute(
             "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
         ).fetchone()
         return _conversation_dict(row) if row else None
 
+    @_synchronized
     def update_conversation(self, conversation_id: str, title: str | None = None,
                             pinned: bool | None = None) -> dict | None:
         """Partially update a conversation's title and/or pinned flag.
@@ -139,6 +179,7 @@ class Store:
             return None
         return self.get_conversation(conversation_id)
 
+    @_synchronized
     def delete_conversation(self, conversation_id: str) -> bool:
         cur = self._conn.execute(
             "DELETE FROM conversations WHERE id = ?", (conversation_id,)
@@ -148,29 +189,67 @@ class Store:
 
     # -- messages ----------------------------------------------------------
 
+    @_synchronized
     def add_message(self, conversation_id: str, role: str, content: str,
                     latency_ms: int | None = None) -> dict:
-        now = time.time()
-        message = {
-            "id": uuid.uuid4().hex,
-            "conversation_id": conversation_id,
-            "role": role,
-            "content": content,
-            "latency_ms": latency_ms,
-            "created_at": now,
-        }
-        self._conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, latency_ms, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (message["id"], conversation_id, role, content, latency_ms, now),
-        )
-        self._conn.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?",
-            (now, conversation_id),
-        )
+        message = new_message(conversation_id, role, content, latency_ms)
+        self._insert_message(message)
         self._conn.commit()
         return message
 
+    def _insert_message(self, message: dict) -> None:
+        self._conn.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, latency_ms, created_at)"
+            " VALUES (:id, :conversation_id, :role, :content, :latency_ms, :created_at)",
+            message,
+        )
+        self._conn.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (message["created_at"], message["conversation_id"]),
+        )
+
+    # -- deferred writes ---------------------------------------------------
+
+    def defer_turn(self, messages: list[dict], title: str | None = None) -> None:
+        """Queue a chat turn (its messages, plus an optional auto-title) for
+        persistence by the next `flush()` or store call, whichever comes first."""
+        with self._lock:
+            self._pending.append((messages, title))
+
+    @_synchronized
+    def flush(self) -> None:
+        """Apply all deferred writes (the work happens in `_synchronized`)."""
+
+    def _drain_pending(self) -> None:
+        """Write every queued turn in one transaction (a single commit/fsync)."""
+        if not self._pending:
+            return
+        if not self._conn.in_transaction:
+            # Explicit BEGIN: otherwise releasing the outermost savepoint
+            # below would commit each turn on its own.
+            self._conn.execute("BEGIN")
+        while self._pending:
+            messages, title = self._pending.popleft()
+            # A savepoint per turn, so one bad turn (e.g. its conversation was
+            # deleted while the turn was in flight) doesn't sink the batch.
+            self._conn.execute("SAVEPOINT turn")
+            try:
+                if title is not None:
+                    self._conn.execute(
+                        "UPDATE conversations SET title = ? WHERE id = ?",
+                        (title, messages[0]["conversation_id"]),
+                    )
+                for message in messages:
+                    self._insert_message(message)
+            except sqlite3.Error:
+                self._conn.execute("ROLLBACK TO turn")
+                logger.exception("dropping deferred chat turn for conversation %s",
+                                 messages[0]["conversation_id"])
+            finally:
+                self._conn.execute("RELEASE turn")
+        self._conn.commit()
+
+    @_synchronized
     def list_messages(self, conversation_id: str, limit: int | None = None,
                       before: str | None = None) -> list[dict]:
         """List a conversation's messages in chronological order.
@@ -204,4 +283,6 @@ class Store:
         return [_row_to_dict(r, drop=("rowid",)) for r in reversed(rows)]
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._drain_pending()
+            self._conn.close()
