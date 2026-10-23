@@ -10,6 +10,10 @@ from .config import upstream_urls
 
 _CacheKey = tuple[str | None, int | None]
 
+# Latencies below this count as equal, and costs within _TIE_RATIO of the cheapest are ties.
+_MIN_COST_S = 0.01
+_TIE_RATIO = 1.25
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -60,6 +64,11 @@ class UpstreamPool:
                  final_timeout: float | None = None):
         self._urls = list(urls or upstream_urls())
         self._next = 0
+        self._in_flight = [0] * len(self._urls)
+        self._ewma: list[float | None] = [None] * len(self._urls)
+        self._ewma_alpha = _env_float("UPSTREAM_EWMA_ALPHA", 0.3)
+        # A failed attempt counts as at least this slow, so one timeout keeps traffic away for a while.
+        self._failure_penalty = _env_float("UPSTREAM_FAILURE_PENALTY_S", 1.0)
         # Every attempt but the last is cut short so a slow or spiking backend fails over
         # quickly; the last backend tried gets the long timeout so the request still succeeds.
         if attempt_timeout is None:
@@ -105,35 +114,69 @@ class UpstreamPool:
             self._cache.put(key, body)
         return status, body
 
+    def _pick(self, start: int, tried: set[int]) -> int:
+        """Cheapest untried backend by latency EWMA x (in-flight + 1); near-ties go round-robin."""
+        n = len(self._urls)
+        known = [e for e in self._ewma if e is not None]
+        prior = min(known) if known else 0.0
+        order = [i for i in ((start + k) % n for k in range(n)) if i not in tried]
+        costs = {}
+        for i in order:
+            ewma = self._ewma[i] if self._ewma[i] is not None else prior
+            costs[i] = max(ewma, _MIN_COST_S) * (self._in_flight[i] + 1)
+        cheapest = min(costs.values())
+        return next(i for i in order if costs[i] <= cheapest * _TIE_RATIO)
+
+    def _observe(self, i: int, began: float, failed: bool = False) -> None:
+        sample = time.monotonic() - began
+        if failed:
+            sample = max(sample, self._failure_penalty)
+        prev = self._ewma[i]
+        a = self._ewma_alpha
+        self._ewma[i] = sample if prev is None else (1 - a) * prev + a * sample
+
     async def _post(self, payload: dict) -> tuple[int, dict]:
-        """Round-robin start, then fail over to each remaining backend at most once."""
+        """Least-loaded backend first, then fail over to the cheapest untried one, each at most once."""
+        n = len(self._urls)
         start = self._next
-        self._next = (start + 1) % len(self._urls)
+        tried: set[int] = set()
         result = (502, {"detail": "no upstream available"})
-        for i in range(len(self._urls)):
-            url = self._urls[(start + i) % len(self._urls)]
-            last = i == len(self._urls) - 1
-            timeout = self._final_timeout if last else self._attempt_timeout
+        for attempt in range(n):
+            i = self._pick(start, tried)
+            if attempt == 0:
+                self._next = (i + 1) % n
+            tried.add(i)
+            timeout = self._final_timeout if attempt == n - 1 else self._attempt_timeout
+            began = time.monotonic()
+            self._in_flight[i] += 1
             try:
                 # asyncio.timeout bounds total elapsed time: httpx's own timeout is
                 # per-phase and resets on each received chunk, so a replica dribbling
                 # the response would otherwise never fail over.
                 async with asyncio.timeout(timeout):
-                    resp = await self._client.post(f"{url}/v1/completions", json=payload,
+                    resp = await self._client.post(f"{self._urls[i]}/v1/completions", json=payload,
                                                    timeout=timeout)
             except (httpx.TimeoutException, TimeoutError):
+                self._observe(i, began, failed=True)
                 result = (504, {"detail": "upstream timeout"})
                 continue
             except httpx.RequestError:
                 # Transport errors plus decode failures (e.g. corrupt gzip body).
+                self._observe(i, began, failed=True)
                 result = (502, {"detail": "upstream unavailable"})
                 continue
+            finally:
+                self._in_flight[i] -= 1
             try:
                 body = resp.json()
             except ValueError:
+                self._observe(i, began, failed=True)
                 body = {"detail": "invalid upstream response"}
                 if resp.status_code < 500:
                     return 502, body
+                result = (resp.status_code, body)
+                continue
+            self._observe(i, began, failed=resp.status_code >= 500)
             if resp.status_code < 500:
                 return resp.status_code, body
             result = (resp.status_code, body)
