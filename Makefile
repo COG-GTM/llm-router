@@ -1,4 +1,4 @@
-.PHONY: services dev bench ui e2e
+.PHONY: services dev bench bench-chat ui e2e
 
 services:
 	docker compose up -d
@@ -8,6 +8,9 @@ dev:
 
 bench:
 	k6 run bench/k6.js
+
+bench-chat:
+	k6 run bench/k6_chat.js
 
 ui:
 	cd frontend && npm ci && npm run build
