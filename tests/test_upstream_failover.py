@@ -95,3 +95,48 @@ def test_failed_attempts_are_not_cached_but_failover_success_is():
     results, hits = _forward({"u1": 503, "u2": 503, "u3": 503}, n=2, cache_size=16, cache_ttl=60)
     assert all(status == 503 for status, _ in results)
     assert len(hits) == 6
+
+
+
+def _pool(hits: list, behaviour: dict) -> UpstreamPool:
+    return UpstreamPool(urls=URLS, transport=_transport(hits, behaviour),
+                        attempt_timeout=0.25, final_timeout=30.0)
+
+
+def test_persistently_slow_backend_is_demoted_behind_healthy_ones():
+    results, hits = _forward({"u1": 1.5}, n=9)
+    assert all(status == 200 for status, _ in results)
+    # u1 times out twice, then healthy u2/u3 round-robin without paying its timeout
+    assert [h for h, _ in hits] == ["u1", "u2", "u2", "u3", "u1", "u2",
+                                    "u2", "u3", "u2", "u3", "u2"]
+
+
+def test_demoted_backend_stays_last_resort_and_recovers():
+    hits: list[tuple[str, float]] = []
+    behaviour: dict = {"u1": 1.5}
+    pool = _pool(hits, behaviour)
+
+    async def run():
+        for _ in range(4):
+            await pool.forward({"prompt": "p"})
+        hits.clear()
+        behaviour.update(u1=0.0, u2=503, u3=503)
+        last_resort = await pool.forward({"prompt": "p"})
+        recovered_hits = list(hits)
+        hits.clear()
+        behaviour.update(u2=0.0, u3=0.0)
+        for _ in range(3):
+            await pool.forward({"prompt": "p"})
+        await pool.aclose()
+        return last_resort, recovered_hits
+
+    last_resort, recovered_hits = asyncio.run(run())
+    assert last_resort == (200, {"completion": "u1"})
+    assert recovered_hits[-1] == ("u1", 30.0)
+    assert sorted(h for h, _ in hits) == ["u1", "u2", "u3"]
+
+
+def test_all_unhealthy_backends_are_still_tried():
+    results, hits = _forward({"u1": 503, "u2": 503, "u3": 503}, n=4)
+    assert all(status == 503 for status, _ in results)
+    assert len(hits) == 12

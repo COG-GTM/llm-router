@@ -10,6 +10,11 @@ from .config import upstream_urls
 
 _CacheKey = tuple[str | None, int | None]
 
+# EWMA weight of the latest attempt in a backend's failure score, and the score at or
+# above which the backend is demoted behind every healthy one.
+_FAILURE_ALPHA = 0.3
+_UNHEALTHY_SCORE = 0.5
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -60,6 +65,7 @@ class UpstreamPool:
                  final_timeout: float | None = None):
         self._urls = list(urls or upstream_urls())
         self._next = 0
+        self._failure = [0.0] * len(self._urls)
         # Every attempt but the last is cut short so a slow or spiking backend fails over
         # quickly; the last backend tried gets the long timeout so the request still succeeds.
         if attempt_timeout is None:
@@ -103,24 +109,44 @@ class UpstreamPool:
             self._cache.put(key, body)
         return status, body
 
-    async def _post(self, payload: dict) -> tuple[int, dict]:
-        """Round-robin start, then fail over to each remaining backend at most once."""
+    def _attempt_order(self) -> list[int]:
+        """Round-robin over healthy backends; unhealthy ones go last, least-failing first."""
+        healthy = [i for i, f in enumerate(self._failure) if f < _UNHEALTHY_SCORE]
+        unhealthy = sorted((i for i, f in enumerate(self._failure) if f >= _UNHEALTHY_SCORE),
+                           key=lambda i: self._failure[i])
         start = self._next
-        self._next = (start + 1) % len(self._urls)
+        self._next += 1
+        if healthy:
+            k = start % len(healthy)
+            healthy = healthy[k:] + healthy[:k]
+        return healthy + unhealthy
+
+    def _observe(self, idx: int, failed: bool) -> None:
+        self._failure[idx] += _FAILURE_ALPHA * (float(failed) - self._failure[idx])
+
+    async def _post(self, payload: dict) -> tuple[int, dict]:
+        """Try backends in health-aware round-robin order, failing over to each at most once."""
+        order = self._attempt_order()
         result = (502, {"detail": "no upstream available"})
-        for i in range(len(self._urls)):
-            url = self._urls[(start + i) % len(self._urls)]
-            last = i == len(self._urls) - 1
+        for i, idx in enumerate(order):
+            url = self._urls[idx]
+            last = i == len(order) - 1
             timeout = self._final_timeout if last else self._attempt_timeout
+            started = time.monotonic()
             try:
                 resp = await self._client.post(f"{url}/v1/completions", json=payload,
                                                timeout=timeout)
             except httpx.TimeoutException:
+                self._observe(idx, True)
                 result = (504, {"detail": "upstream timeout"})
                 continue
             except httpx.TransportError:
+                self._observe(idx, True)
                 result = (502, {"detail": "upstream unavailable"})
                 continue
+            # A response slower than the attempt budget counts against the backend too.
+            slow = time.monotonic() - started > self._attempt_timeout
+            self._observe(idx, resp.status_code >= 500 or slow)
             try:
                 body = resp.json()
             except ValueError:
