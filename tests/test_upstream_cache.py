@@ -62,7 +62,8 @@ def test_non_200_responses_are_not_cached():
         return results
 
     results = asyncio.run(run())
-    assert len(hits) == 2
+    # each uncached request fails over across every backend
+    assert len(hits) == 2 * len(URLS)
     assert all(status == 503 for status, _ in results)
 
 

@@ -3,13 +3,26 @@ import copy
 import os
 import time
 from collections import OrderedDict
-from itertools import cycle
 
 import httpx
 
 from .config import upstream_urls
 
 _CacheKey = tuple[str | None, int | None]
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
 
 
 class _ResponseCache:
@@ -42,14 +55,29 @@ class UpstreamPool:
     def __init__(self, urls: list[str] | None = None,
                  transport: httpx.AsyncBaseTransport | None = None,
                  cache_size: int | None = None,
-                 cache_ttl: float | None = None):
-        self._urls = cycle(urls or upstream_urls())
-        self._client = httpx.AsyncClient(timeout=None, transport=transport)
+                 cache_ttl: float | None = None,
+                 attempt_timeout: float | None = None,
+                 final_timeout: float | None = None):
+        self._urls = list(urls or upstream_urls())
+        self._next = 0
+        # Every attempt but the last is cut short so a slow or spiking backend fails over
+        # quickly; the last backend tried gets the long timeout so the request still succeeds.
+        if attempt_timeout is None:
+            attempt_timeout = _env_float("UPSTREAM_ATTEMPT_TIMEOUT_S", 0.25)
+        if final_timeout is None:
+            final_timeout = _env_float("UPSTREAM_FINAL_TIMEOUT_S", 30.0)
+        self._attempt_timeout = attempt_timeout
+        self._final_timeout = final_timeout
+        limits = httpx.Limits(
+            max_connections=_env_int("UPSTREAM_MAX_CONNECTIONS", 256),
+            max_keepalive_connections=_env_int("UPSTREAM_MAX_KEEPALIVE", 64),
+        )
+        self._client = httpx.AsyncClient(timeout=final_timeout, limits=limits, transport=transport)
         # Injected transports (tests) default to no caching so they observe every call.
         if cache_size is None:
-            cache_size = 0 if transport else int(os.environ.get("UPSTREAM_CACHE_SIZE", "1024"))
+            cache_size = 0 if transport else _env_int("UPSTREAM_CACHE_SIZE", 1024)
         if cache_ttl is None:
-            cache_ttl = float(os.environ.get("UPSTREAM_CACHE_TTL_S", "300"))
+            cache_ttl = _env_float("UPSTREAM_CACHE_TTL_S", 300.0)
         enabled = cache_size > 0 and cache_ttl > 0
         self._cache = _ResponseCache(cache_size, cache_ttl) if enabled else None
         self._inflight: dict[_CacheKey, asyncio.Task] = {}
@@ -76,9 +104,33 @@ class UpstreamPool:
         return status, body
 
     async def _post(self, payload: dict) -> tuple[int, dict]:
-        url = next(self._urls)
-        resp = await self._client.post(f"{url}/v1/completions", json=payload)
-        return resp.status_code, resp.json()
+        """Round-robin start, then fail over to each remaining backend at most once."""
+        start = self._next
+        self._next = (start + 1) % len(self._urls)
+        result = (502, {"detail": "no upstream available"})
+        for i in range(len(self._urls)):
+            url = self._urls[(start + i) % len(self._urls)]
+            last = i == len(self._urls) - 1
+            timeout = self._final_timeout if last else self._attempt_timeout
+            try:
+                resp = await self._client.post(f"{url}/v1/completions", json=payload,
+                                               timeout=timeout)
+            except httpx.TimeoutException:
+                result = (504, {"detail": "upstream timeout"})
+                continue
+            except httpx.TransportError:
+                result = (502, {"detail": "upstream unavailable"})
+                continue
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {"detail": "invalid upstream response"}
+                if resp.status_code < 500:
+                    return 502, body
+            if resp.status_code < 500:
+                return resp.status_code, body
+            result = (resp.status_code, body)
+        return result
 
     async def aclose(self) -> None:
         await self._client.aclose()
