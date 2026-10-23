@@ -101,3 +101,32 @@ def test_fails_over_on_connection_error():
         return result
 
     assert asyncio.run(run()) == (200, {"completion": "ok"})
+
+
+def test_attempt_cap_applies_to_failover():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(request.url.host)
+        raise httpx.ConnectError("down")
+
+    pool = UpstreamPool(urls=["http://u1:9000", "http://u2:9000"],
+                        transport=httpx.MockTransport(handler), attempts=1)
+
+    async def run():
+        try:
+            await pool.forward({"prompt": "p"})
+        except httpx.ConnectError:
+            pass
+        await pool.aclose()
+
+    asyncio.run(run())
+    assert hits == ["u1"]
+
+
+def test_plan_reaches_slow_upstreams_when_one_is_healthy():
+    urls = ["http://a", "http://b", "http://c"]
+    pool = UpstreamPool(urls=urls, attempts=4)
+    pool._ewma = {"http://a": 0.1, "http://b": 2.0, "http://c": 3.0}
+    plan = pool._plan()
+    assert plan[:2] == ["http://a", "http://a"] and set(plan[2:]) == {"http://b", "http://c"}

@@ -25,18 +25,30 @@ def scrub(text: str) -> str:
 
 def audit_record(fields: dict, prev_digest: bytes = b"") -> tuple[str, bytes]:
     """Build a log line whose integrity hash chains to the previous entry (tamper-evident)."""
-    canonical = json.dumps(fields, sort_keys=True)
-    digest = hashlib.sha256(prev_digest + canonical.encode()).digest()
-    return json.dumps({"entry": scrub(canonical), "integrity": digest.hex()}), digest
+    entry = scrub(json.dumps(fields, sort_keys=True))
+    digest = hashlib.sha256(prev_digest + entry.encode()).digest()
+    return json.dumps({"entry": entry, "integrity": digest.hex()}), digest
+
+
+def _last_line(path: str, chunk: int = 4096) -> bytes:
+    with open(path, "rb") as f:
+        pos = f.seek(0, os.SEEK_END)
+        buf = b""
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            f.seek(pos)
+            buf = f.read(step) + buf
+            if b"\n" in buf.rstrip(b"\n"):
+                break
+        lines = buf.splitlines()
+        return lines[-1] if lines else b""
 
 
 def _last_digest(path: str) -> bytes:
     try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 4096))
-            lines = f.read().splitlines()
-        return bytes.fromhex(json.loads(lines[-1])["integrity"]) if lines else b""
+        line = _last_line(path)
+        return bytes.fromhex(json.loads(line)["integrity"]) if line else b""
     except (OSError, ValueError, KeyError, IndexError):
         return b""
 

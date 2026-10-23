@@ -45,8 +45,11 @@ class UpstreamPool:
             slow = sorted((u for u in rotated if u not in healthy), key=self._ewma.__getitem__)
             for u in slow:
                 self._ewma[u] *= _SLOW_DECAY
-        targets = list(islice(cycle(healthy), self._max_attempts)) if healthy else []
-        return targets + slow  # slow upstreams only as last-resort failover
+        # Distinct healthy upstreams first, then re-tries on healthy ones, with slow
+        # upstreams kept as the last hedges so they are still reachable.
+        repeats = max(0, self._max_attempts - len(healthy) - len(slow))
+        targets = healthy + list(islice(cycle(healthy), repeats)) + slow
+        return targets[:self._max_attempts]
 
     def _record(self, url: str, seconds: float) -> None:
         prev = self._ewma.get(url)
@@ -72,7 +75,7 @@ class UpstreamPool:
         launch()
         try:
             while pending:
-                can_hedge = launched < min(len(targets), self._max_attempts)
+                can_hedge = launched < len(targets)
                 done, _ = await asyncio.wait(
                     pending, timeout=self._hedge_delay if can_hedge else None,
                     return_when=asyncio.FIRST_COMPLETED,
