@@ -2,7 +2,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..prompting import flatten_history
+from ..prompting import flatten_history, history_message_limit
 from ..schemas import ChatRequest, ChatTurnResponse
 
 router = APIRouter(tags=["chat"])
@@ -17,7 +17,7 @@ async def chat(body: ChatRequest, request: Request):
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
 
-    history = store.list_messages(body.conversation_id)
+    history = store.list_messages(body.conversation_id, limit=history_message_limit())
     prompt = flatten_history(history, body.message)
 
     start = time.monotonic()

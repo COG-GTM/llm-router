@@ -1,4 +1,12 @@
-from app.prompting import SYSTEM_PREAMBLE, flatten_history, token_estimate
+import pytest
+
+from app.prompting import (
+    DEFAULT_HISTORY_TURNS,
+    SYSTEM_PREAMBLE,
+    flatten_history,
+    history_message_limit,
+    token_estimate,
+)
 
 
 def test_flatten_empty_history():
@@ -28,3 +36,19 @@ def test_flatten_is_deterministic():
 def test_token_estimate():
     assert token_estimate("") == 1
     assert token_estimate("one two three four five six") == 8  # 6 words / 0.75
+
+
+def test_history_message_limit_default(monkeypatch):
+    monkeypatch.delenv("CHAT_HISTORY_TURNS", raising=False)
+    assert history_message_limit() == 2 * DEFAULT_HISTORY_TURNS == 20
+
+
+def test_history_message_limit_from_env(monkeypatch):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", "3")
+    assert history_message_limit() == 6
+
+
+@pytest.mark.parametrize("raw", ["abc", "", "2.5", "0", "-4"])
+def test_history_message_limit_invalid_falls_back(monkeypatch, raw):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", raw)
+    assert history_message_limit() == 2 * DEFAULT_HISTORY_TURNS

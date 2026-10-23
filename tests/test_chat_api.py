@@ -91,3 +91,26 @@ def test_chat_upstream_error_passthrough_and_no_persist():
     c.__exit__(None, None, None)
     assert resp.status_code == 503
     assert msgs == []  # failed exchanges are not persisted
+
+
+def test_chat_prompt_includes_only_newest_history_in_order(monkeypatch):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", "2")
+    pool = FakePool()
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    for i in range(5):
+        c.post("/v1/chat", json={"conversation_id": cid, "message": f"q{i}"})
+    convo_title = next(x for x in c.get("/v1/conversations").json() if x["id"] == cid)["title"]
+    msgs = c.get(f"/v1/conversations/{cid}/messages").json()
+    c.__exit__(None, None, None)
+
+    assert len(msgs) == 10  # full history is still persisted
+    prompt = pool.calls[-1]["prompt"]
+    turns = [line for line in prompt.splitlines() if line.startswith(("User:", "Assistant:"))]
+    assert turns == [
+        "User: q2", "Assistant: mock answer",
+        "User: q3", "Assistant: mock answer",
+        "User: q4", "Assistant:",
+    ]
+    assert "q0" not in prompt and "q1" not in prompt
+    assert convo_title == "q0"  # auto-title only from the first message
