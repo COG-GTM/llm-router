@@ -62,8 +62,8 @@ def test_non_200_responses_are_not_cached():
         return results
 
     results = asyncio.run(run())
-    # each miss retries once on the next replica after a 503
-    assert len(hits) == 4
+    # each uncached request fails over across every backend
+    assert len(hits) == 2 * len(URLS)
     assert all(status == 503 for status, _ in results)
 
 
@@ -90,7 +90,7 @@ def test_failed_shared_fetch_retries_another_replica():
     assert all(r == (200, {"completion": "ok", "usage": {"tokens": 1}}) for r in results)
 
 
-def test_shared_fetch_stops_after_two_attempts():
+def test_shared_fetch_tries_each_backend_once():
     hits: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -107,7 +107,7 @@ def test_shared_fetch_stops_after_two_attempts():
         return result
 
     status, _ = asyncio.run(run())
-    assert hits == ["u1", "u2"]
+    assert hits == ["u1", "u2", "u3"]
     assert status == 503
 
 
