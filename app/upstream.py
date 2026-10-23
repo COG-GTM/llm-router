@@ -98,6 +98,8 @@ class UpstreamPool:
         return status, copy.deepcopy(body)
 
     async def _fetch(self, key: _CacheKey, payload: dict) -> tuple[int, dict]:
+        # _post already fails over across every backend, so coalesced callers are
+        # never pinned to one failing replica.
         status, body = await self._post(payload)
         if status == 200:
             self._cache.put(key, body)

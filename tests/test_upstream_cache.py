@@ -67,6 +67,70 @@ def test_non_200_responses_are_not_cached():
     assert all(status == 503 for status, _ in results)
 
 
+def test_failed_shared_fetch_retries_another_replica():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(f"{request.url.host}")
+        if request.url.host == "u1":
+            return httpx.Response(503, json={"error": "down"})
+        return httpx.Response(200, json={"completion": "ok", "usage": {"tokens": 1}})
+
+    pool = _pool(httpx.MockTransport(handler), cache_ttl=60)
+
+    async def run():
+        results = await asyncio.gather(
+            *(pool.forward({"prompt": "p", "max_tokens": 64}) for _ in range(5))
+        )
+        await pool.aclose()
+        return results
+
+    results = asyncio.run(run())
+    assert hits == ["u1", "u2"]
+    assert all(r == (200, {"completion": "ok", "usage": {"tokens": 1}}) for r in results)
+
+
+def test_shared_fetch_tries_each_backend_once():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(f"{request.url.host}")
+        if request.url.host == "u1":
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(503, json={"error": "down"})
+
+    pool = _pool(httpx.MockTransport(handler), cache_ttl=60)
+
+    async def run():
+        result = await pool.forward({"prompt": "p", "max_tokens": 64})
+        await pool.aclose()
+        return result
+
+    status, _ = asyncio.run(run())
+    assert hits == ["u1", "u2", "u3"]
+    assert status == 503
+
+
+def test_client_error_is_not_retried():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(f"{request.url.host}")
+        return httpx.Response(400, json={"error": "invalid max_tokens"})
+
+    pool = _pool(httpx.MockTransport(handler), cache_ttl=60)
+
+    async def run():
+        result = await pool.forward({"prompt": "p", "max_tokens": 64})
+        await pool.aclose()
+        return result
+
+    status, body = asyncio.run(run())
+    assert hits == ["u1"]
+    assert status == 400
+    assert body == {"error": "invalid max_tokens"}
+
+
 def test_cached_body_cannot_be_mutated_by_callers():
     hits: list = []
     pool = _pool(_transport(hits))
