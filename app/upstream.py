@@ -70,7 +70,14 @@ class UpstreamPool:
         return status, copy.deepcopy(body)
 
     async def _fetch(self, key: _CacheKey, payload: dict) -> tuple[int, dict]:
-        status, body = await self._post(payload)
+        # A failed shared fetch must not pin every coalesced caller to one
+        # replica: retry once on the next replica before surfacing the error.
+        try:
+            status, body = await self._post(payload)
+        except httpx.HTTPError:
+            status, body = await self._post(payload)
+        if status != 200:
+            status, body = await self._post(payload)
         if status == 200:
             self._cache.put(key, body)
         return status, body

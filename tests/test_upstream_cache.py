@@ -62,8 +62,32 @@ def test_non_200_responses_are_not_cached():
         return results
 
     results = asyncio.run(run())
-    assert len(hits) == 2
+    # each miss retries once on the next replica after a 503
+    assert len(hits) == 4
     assert all(status == 503 for status, _ in results)
+
+
+def test_failed_shared_fetch_retries_another_replica():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(f"{request.url.host}")
+        if request.url.host == "u1":
+            return httpx.Response(503, json={"error": "down"})
+        return httpx.Response(200, json={"completion": "ok", "usage": {"tokens": 1}})
+
+    pool = _pool(httpx.MockTransport(handler), cache_ttl=60)
+
+    async def run():
+        results = await asyncio.gather(
+            *(pool.forward({"prompt": "p", "max_tokens": 64}) for _ in range(5))
+        )
+        await pool.aclose()
+        return results
+
+    results = asyncio.run(run())
+    assert hits == ["u1", "u2"]
+    assert all(r == (200, {"completion": "ok", "usage": {"tokens": 1}}) for r in results)
 
 
 def test_cached_body_cannot_be_mutated_by_callers():
