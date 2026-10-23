@@ -160,7 +160,7 @@ def test_chat_auto_title_unaffected_by_history_limit(monkeypatch):
     assert convo["title"] == "question 1"  # titled on turn 1, not re-titled later
 
 
-@pytest.mark.parametrize("raw,expected", [("", 10), ("4", 4), ("0", 1), ("-2", 1)])
+@pytest.mark.parametrize("raw,expected", [("", 10), ("4", 4), ("0", 1), ("-2", 1), ("ten", 10)])
 def test_chat_history_turns_env(monkeypatch, raw, expected):
     monkeypatch.setenv("CHAT_HISTORY_TURNS", raw)
     assert chat_history_turns() == expected
