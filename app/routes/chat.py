@@ -2,6 +2,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
+from ..config import chat_history_turns
 from ..prompting import flatten_history
 from ..schemas import ChatRequest, ChatTurnResponse
 
@@ -17,7 +18,9 @@ async def chat(body: ChatRequest, request: Request):
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
 
-    history = store.list_messages(body.conversation_id)
+    # Each turn is a user message plus the assistant reply. list_messages
+    # returns the most recent `limit` messages in chronological order.
+    history = store.list_messages(body.conversation_id, limit=2 * chat_history_turns())
     prompt = flatten_history(history, body.message)
 
     start = time.monotonic()

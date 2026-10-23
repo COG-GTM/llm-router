@@ -1,6 +1,8 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
+from app.config import chat_history_turns
 
 
 class FakePool:
@@ -91,3 +93,74 @@ def test_chat_upstream_error_passthrough_and_no_persist():
     c.__exit__(None, None, None)
     assert resp.status_code == 503
     assert msgs == []  # failed exchanges are not persisted
+
+
+class NumberedPool(FakePool):
+    """Returns a distinct completion per call so prompt ordering is checkable."""
+
+    async def forward(self, payload):
+        self.calls.append(payload)
+        return 200, {"completion": f"answer {len(self.calls)}", "model": "mock-large"}
+
+
+def run_turns(c, cid, n):
+    for i in range(1, n + 1):
+        c.post("/v1/chat", json={"conversation_id": cid, "message": f"question {i}"})
+
+
+def test_chat_prompt_includes_only_last_n_turns_in_order(monkeypatch):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", "3")
+    pool = NumberedPool()
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    run_turns(c, cid, 8)
+    c.post("/v1/chat", json={"conversation_id": cid, "message": "question 9"})
+    msgs = c.get(f"/v1/conversations/{cid}/messages").json()
+    c.__exit__(None, None, None)
+
+    assert len(msgs) == 18  # full history is still persisted
+    prompt = pool.calls[-1]["prompt"]
+    for i in range(1, 6):
+        assert f"User: question {i}\n" not in prompt
+        assert f"Assistant: answer {i}\n" not in prompt
+    expected = [
+        "User: question 6", "Assistant: answer 6",
+        "User: question 7", "Assistant: answer 7",
+        "User: question 8", "Assistant: answer 8",
+        "User: question 9", "Assistant:",
+    ]
+    assert prompt.split("\n")[2:] == expected
+
+
+def test_chat_prompt_bounded_by_default():
+    pool = NumberedPool()
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    run_turns(c, cid, 50)
+    c.__exit__(None, None, None)
+
+    prompt = pool.calls[-1]["prompt"]
+    history_lines = prompt.split("\n")[2:-2]
+    assert len(history_lines) == 20  # default: last 10 turns
+    assert history_lines[0] == "User: question 40"
+    assert history_lines[-1] == "Assistant: answer 49"
+    assert len(pool.calls[29]["prompt"]) == pytest.approx(len(prompt), abs=20)
+
+
+def test_chat_auto_title_unaffected_by_history_limit(monkeypatch):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", "1")
+    pool = NumberedPool()
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    run_turns(c, cid, 3)
+    convo = next(x for x in c.get("/v1/conversations").json() if x["id"] == cid)
+    c.__exit__(None, None, None)
+
+    assert pool.calls[0]["prompt"].split("\n")[2:] == ["User: question 1", "Assistant:"]
+    assert convo["title"] == "question 1"  # titled on turn 1, not re-titled later
+
+
+@pytest.mark.parametrize("raw,expected", [("", 10), ("4", 4), ("0", 1), ("-2", 1)])
+def test_chat_history_turns_env(monkeypatch, raw, expected):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", raw)
+    assert chat_history_turns() == expected
