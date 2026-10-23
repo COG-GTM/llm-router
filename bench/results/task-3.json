@@ -1,0 +1,222 @@
+{
+  "task": 3,
+  "branch": "devin/1761237800-task3-max-tokens-bound",
+  "commit_sha": "3a2d354281074c7cd211c265d84fd33337e2d6f3",
+  "baseline_sha": "8eaf85dd5120a174f17398ec59648b411d8b341a",
+  "harness": "generate",
+  "script": "bench/k6.js",
+  "runs_per_side": 3,
+  "summary": {
+    "p50_ms": {
+      "baseline": 156.0,
+      "after": 155.0,
+      "abs_ms": 1.0,
+      "pct_improvement": 0.6
+    },
+    "p95_ms": {
+      "baseline": 3046.0,
+      "after": 2857.0,
+      "abs_ms": 189.0,
+      "pct_improvement": 6.2
+    },
+    "p99_ms": {
+      "baseline": 4144.0,
+      "after": 3997.0,
+      "abs_ms": 147.0,
+      "pct_improvement": 3.5
+    },
+    "error_rate_pct": {
+      "baseline": 0.0,
+      "after": 0.0
+    },
+    "checks_pct": {
+      "baseline": 100.0,
+      "after": 100.0
+    }
+  },
+  "pytest": "pass",
+  "e2e": "pass",
+  "notes": "max_tokens is now validated on GenerateRequest and ChatRequest: <1 -> 422, >MAX_TOKENS_LIMIT (env, default 1024, non-numeric/<1 env falls back to 1024) -> 422 (reject, not clamp, so clients never silently get a shorter generation); default stays 64. What clients actually send: frontend/src never sends max_tokens (api/client.ts sendChat posts only conversation_id+message, so the UI always gets the default 64); bench/k6.js and bench/k6_chat.js send 64; bench/workload.json has no max_tokens; existing tests send 8 (/v1/generate) and 16 (/v1/chat); README did not mention it before. The router's request log (RequestLogMiddleware) logs method/path/status/duration only, not bodies, so bench logs cannot show values beyond the k6 scripts' 64. All in-repo clients are within 1..1024, so nothing legitimate is rejected. The mock backend's latency is independent of max_tokens (it also caps completions at 256 words itself), and the bench always sends 64, so no bench movement is expected: medians are within run-to-run noise. The value is protecting real backends from negative/zero/runaway generation requests, not latency.",
+  "baseline": {
+    "harness": "generate",
+    "script": "bench/k6.js",
+    "runs": [
+      {
+        "p50_ms": 155.0,
+        "p95_ms": 3146.0,
+        "p99_ms": 4179.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          155 ms\n  p95          3146 ms\n  p99          4179 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 156.0,
+        "p95_ms": 2880.0,
+        "p99_ms": 4102.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          156 ms\n  p95          2880 ms\n  p99          4102 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 156.0,
+        "p95_ms": 3046.0,
+        "p99_ms": 4144.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          156 ms\n  p95          3046 ms\n  p99          4144 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      }
+    ],
+    "median": {
+      "p50_ms": 156.0,
+      "p95_ms": 3046.0,
+      "p99_ms": 4144.0,
+      "error_rate_pct": 0.0,
+      "checks_pct": 100.0
+    }
+  },
+  "after": {
+    "harness": "generate",
+    "script": "bench/k6.js",
+    "runs": [
+      {
+        "p50_ms": 155.0,
+        "p95_ms": 3183.0,
+        "p99_ms": 4209.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          155 ms\n  p95          3183 ms\n  p99          4209 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1800,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 156.0,
+        "p95_ms": 2857.0,
+        "p99_ms": 3997.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          156 ms\n  p95          2857 ms\n  p99          3997 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1801,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1801,
+            "fails": 0
+          }
+        }
+      },
+      {
+        "p50_ms": 154.0,
+        "p95_ms": 2825.0,
+        "p99_ms": 3989.0,
+        "error_rate_pct": 0.0,
+        "checks_pct": 100.0,
+        "raw_stdout": "\n=== bench summary (60s @ 30 rps) ===\n  p50          154 ms\n  p95          2825 ms\n  p99          3989 ms\n  error rate   0.00 %\n  checks       100.00 %\n",
+        "checks_detail": {
+          "status 200": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "completion non-empty": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature well-formed": {
+            "passes": 1800,
+            "fails": 0
+          },
+          "signature stable for prompt": {
+            "passes": 1800,
+            "fails": 0
+          }
+        }
+      }
+    ],
+    "median": {
+      "p50_ms": 155.0,
+      "p95_ms": 2857.0,
+      "p99_ms": 3997.0,
+      "error_rate_pct": 0.0,
+      "checks_pct": 100.0
+    }
+  }
+}
