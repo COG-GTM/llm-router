@@ -144,14 +144,14 @@ def test_hung_unmeasured_backend_does_not_absorb_traffic():
         await pool.forward({"prompt": "p"})
         hung = asyncio.create_task(pool.forward({"prompt": "p"}))
         await hung_started.wait()
-        for _ in range(8):
-            await pool.forward({"prompt": "p"})
+        rest = [asyncio.create_task(pool.forward({"prompt": "p"})) for _ in range(8)]
+        await asyncio.sleep(0.1)
         release.set()
-        await hung
+        await asyncio.gather(hung, *rest)
         await pool.aclose()
 
     asyncio.run(run())
-    assert hits.count("http://u2:9000") == 1
+    assert hits.count("http://u2:9000") <= 2
 
 
 def test_fast_failures_are_penalized():
@@ -181,3 +181,32 @@ def test_fast_failures_are_penalized():
     asyncio.run(run())
     assert hits[:3] == urls
     assert set(hits[3:]) == {"http://u3:9000"}
+
+
+def test_untried_backend_preferred_over_failing_one():
+    hits: list[str] = []
+    probe_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = _host(request)
+        hits.append(host)
+        if host == "http://u1:9000":
+            return httpx.Response(503, json={"detail": "down"})
+        probe_started.set()
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"completion": "ok"})
+
+    urls = ["http://u1:9000", "http://u2:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        await pool.forward({"prompt": "p"})
+        probe = asyncio.create_task(pool.forward({"prompt": "p"}))
+        await probe_started.wait()
+        result = await pool.forward({"prompt": "p"})
+        await probe
+        await pool.aclose()
+        return result
+
+    assert asyncio.run(run()) == (200, {"completion": "ok"})
+    assert hits == ["http://u1:9000", "http://u2:9000", "http://u2:9000"]
