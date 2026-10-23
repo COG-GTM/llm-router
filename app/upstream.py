@@ -71,13 +71,17 @@ class UpstreamPool:
 
     async def _fetch(self, key: _CacheKey, payload: dict) -> tuple[int, dict]:
         # A failed shared fetch must not pin every coalesced caller to one
-        # replica: retry once on the next replica before surfacing the error.
-        try:
-            status, body = await self._post(payload)
-        except httpx.HTTPError:
-            status, body = await self._post(payload)
-        if status != 200:
-            status, body = await self._post(payload)
+        # replica: at most two attempts, and only for retryable failures
+        # (5xx or transport errors). 4xx is returned unchanged.
+        for attempt in range(2):
+            try:
+                status, body = await self._post(payload)
+            except httpx.HTTPError:
+                if attempt:
+                    raise
+                continue
+            if status == 200 or status < 500 or attempt:
+                break
         if status == 200:
             self._cache.put(key, body)
         return status, body
