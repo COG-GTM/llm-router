@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 from app.store import Store
 
@@ -228,4 +229,73 @@ def test_store_migrates_a_pre_existing_database_missing_the_pinned_column(tmp_pa
     updated = s.update_conversation("legacy-1", pinned=True)
     assert updated["pinned"] is True
     assert s.get_conversation("legacy-1")["pinned"] is True
+    s.close()
+
+
+def test_add_turn_persists_both_messages_and_title(tmp_path):
+    s = make_store(tmp_path)
+    c = s.create_conversation()
+    user, assistant = s.add_turn(c["id"], "hello", "hi there", latency_ms=42, title="hello")
+    msgs = s.list_messages(c["id"])
+    assert [m["id"] for m in msgs] == [user["id"], assistant["id"]]
+    assert [(m["role"], m["content"], m["latency_ms"]) for m in msgs] == [
+        ("user", "hello", None), ("assistant", "hi there", 42)]
+    convo = s.get_conversation(c["id"])
+    assert convo["title"] == "hello"
+    assert convo["updated_at"] == assistant["created_at"]
+    s.close()
+
+
+def test_add_turn_is_atomic(tmp_path):
+    s = make_store(tmp_path)
+    try:
+        s.add_turn("missing", "hello", "hi")
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("expected a foreign key failure")
+    assert s._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+    # the connection is still usable after the rollback
+    c = s.create_conversation()
+    s.add_message(c["id"], "user", "ok")
+    assert len(s.list_messages(c["id"])) == 1
+    s.close()
+
+
+def test_store_is_thread_safe_under_concurrent_use(tmp_path):
+    s = make_store(tmp_path)
+    convos = [s.create_conversation()["id"] for _ in range(4)]
+    workers, turns = 16, 25
+    errors: list[BaseException] = []
+    start = threading.Barrier(workers)
+
+    def hammer(n):
+        try:
+            start.wait()
+            cid = convos[n % len(convos)]
+            for i in range(turns):
+                if i % 2:
+                    s.add_turn(cid, f"u{n}-{i}", f"a{n}-{i}", latency_ms=i)
+                else:
+                    s.add_message(cid, "user", f"u{n}-{i}")
+                    s.add_message(cid, "assistant", f"a{n}-{i}")
+                s.list_messages(cid, limit=5)
+                s.get_conversation(cid)
+                s.update_conversation(cid, pinned=bool(i % 3))
+                s.list_conversations(q="new")
+        except BaseException as exc:  # noqa: BLE001 - surface any failure to the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=(n,)) for n in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    total = sum(len(s.list_messages(cid)) for cid in convos)
+    assert total == workers * turns * 2
+    for cid in convos:
+        roles = [m["role"] for m in s.list_messages(cid)]
+        assert roles.count("user") == roles.count("assistant")
     s.close()

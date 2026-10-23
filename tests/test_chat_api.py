@@ -1,3 +1,5 @@
+import threading
+
 from fastapi.testclient import TestClient
 
 from app import main
@@ -91,3 +93,34 @@ def test_chat_upstream_error_passthrough_and_no_persist():
     c.__exit__(None, None, None)
     assert resp.status_code == 503
     assert msgs == []  # failed exchanges are not persisted
+
+
+def test_chat_runs_store_calls_off_the_event_loop():
+    loop_threads: set[int] = set()
+    store_threads: list[tuple[str, int]] = []
+
+    class LoopRecordingPool(FakePool):
+        async def forward(self, payload):
+            loop_threads.add(threading.get_ident())
+            return await super().forward(payload)
+
+    c = chat_client(LoopRecordingPool())
+    store = main.app.state.store
+    for name in ("get_conversation", "list_messages", "add_turn", "add_message",
+                 "update_conversation"):
+        original = getattr(store, name)
+
+        def recorder(*args, _name=name, _original=original, **kwargs):
+            store_threads.append((_name, threading.get_ident()))
+            return _original(*args, **kwargs)
+
+        setattr(store, name, recorder)
+
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    resp = c.post("/v1/chat", json={"conversation_id": cid, "message": "hi"})
+    c.__exit__(None, None, None)
+
+    assert resp.status_code == 200
+    assert {n for n, _ in store_threads} >= {"get_conversation", "list_messages", "add_turn"}
+    assert len(loop_threads) == 1
+    assert all(ident not in loop_threads for _, ident in store_threads)
