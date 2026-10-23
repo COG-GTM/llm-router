@@ -140,3 +140,24 @@ def test_all_unhealthy_backends_are_still_tried():
     results, hits = _forward({"u1": 503, "u2": 503, "u3": 503}, n=4)
     assert all(status == 503 for status, _ in results)
     assert len(hits) == 12
+
+
+def test_slow_backend_still_gets_final_slot_when_other_backend_is_dead():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "u2":
+            raise httpx.ConnectError("refused", request=request)
+        if request.extensions["timeout"]["read"] < 0.1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, json={"completion": "u1"})
+
+    pool = UpstreamPool(urls=URLS[:2], transport=httpx.MockTransport(handler),
+                        attempt_timeout=0.05, final_timeout=1.0)
+
+    async def run():
+        results = [await pool.forward({"prompt": "p"}) for _ in range(6)]
+        await pool.aclose()
+        return results
+
+    statuses = [status for status, _ in asyncio.run(run())]
+    assert statuses == [502, 200] * 3

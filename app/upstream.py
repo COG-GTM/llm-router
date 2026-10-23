@@ -30,6 +30,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _rotate(items: list[int], k: int) -> list[int]:
+    if not items:
+        return items
+    k %= len(items)
+    return items[k:] + items[:k]
+
+
 class _ResponseCache:
     """Bounded LRU of successful upstream bodies, each entry expiring after `ttl` seconds."""
 
@@ -110,16 +117,17 @@ class UpstreamPool:
         return status, body
 
     def _attempt_order(self) -> list[int]:
-        """Round-robin over healthy backends; unhealthy ones go last, least-failing first."""
+        """Round-robin over healthy backends, then round-robin over unhealthy ones.
+
+        Rotating the unhealthy tail too means each of them still periodically gets the
+        last slot (and its long timeout), so a slow-but-working backend is not starved by
+        a dead one.
+        """
         healthy = [i for i, f in enumerate(self._failure) if f < _UNHEALTHY_SCORE]
-        unhealthy = sorted((i for i, f in enumerate(self._failure) if f >= _UNHEALTHY_SCORE),
-                           key=lambda i: self._failure[i])
+        unhealthy = [i for i, f in enumerate(self._failure) if f >= _UNHEALTHY_SCORE]
         start = self._next
         self._next += 1
-        if healthy:
-            k = start % len(healthy)
-            healthy = healthy[k:] + healthy[:k]
-        return healthy + unhealthy
+        return _rotate(healthy, start) + _rotate(unhealthy, start)
 
     def _observe(self, idx: int, failed: bool) -> None:
         self._failure[idx] += _FAILURE_ALPHA * (float(failed) - self._failure[idx])
