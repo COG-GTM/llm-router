@@ -1,6 +1,7 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
-from app.store import Store
+from app.store import Store, new_message
 
 
 def make_store(tmp_path):
@@ -228,4 +229,45 @@ def test_store_migrates_a_pre_existing_database_missing_the_pinned_column(tmp_pa
     updated = s.update_conversation("legacy-1", pinned=True)
     assert updated["pinned"] is True
     assert s.get_conversation("legacy-1")["pinned"] is True
+    s.close()
+
+
+def test_deferred_turn_applied_before_reads_and_on_close(tmp_path):
+    s = make_store(tmp_path)
+    c = s.create_conversation()
+    user = new_message(c["id"], "user", "hi")
+    assistant = new_message(c["id"], "assistant", "hello", latency_ms=7)
+    s.defer_turn([user, assistant], title="hi")
+    assert s.list_messages(c["id"]) == [user, assistant]
+    assert s.get_conversation(c["id"])["title"] == "hi"
+    assert s.get_conversation(c["id"])["updated_at"] == assistant["created_at"]
+
+    s.defer_turn([new_message(c["id"], "user", "queued at shutdown")])
+    s.close()
+    s = make_store(tmp_path)
+    assert [m["content"] for m in s.list_messages(c["id"])][-1] == "queued at shutdown"
+    s.close()
+
+
+def test_deferred_turn_for_deleted_conversation_is_dropped(tmp_path):
+    s = make_store(tmp_path)
+    c = s.create_conversation()
+    s.defer_turn([new_message("gone", "user", "orphan")])
+    s.defer_turn([new_message(c["id"], "user", "kept")])
+    assert [m["content"] for m in s.list_messages(c["id"])] == ["kept"]
+    s.close()
+
+
+def test_store_is_safe_across_threads(tmp_path):
+    s = make_store(tmp_path)
+    c = s.create_conversation()
+
+    def work(n):
+        s.add_message(c["id"], "user", f"t{n}")
+        s.defer_turn([new_message(c["id"], "assistant", f"d{n}")])
+        return len(s.list_messages(c["id"]))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(work, range(80)))
+    assert len(s.list_messages(c["id"])) == 160
     s.close()
