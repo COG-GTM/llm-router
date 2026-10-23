@@ -41,3 +41,82 @@ def test_round_robin_and_passthrough():
     results = asyncio.run(run())
     assert hits == ["http://u1:9000", "http://u2:9000", "http://u3:9000", "http://u1:9000"]
     assert all(r == (200, {"completion": "ok"}) for r in results)
+
+
+def _host(request: httpx.Request) -> str:
+    return f"{request.url.scheme}://{request.url.host}:{request.url.port}"
+
+
+def test_concurrent_requests_avoid_busy_slow_backend():
+    hits: list[str] = []
+    slow_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = _host(request)
+        hits.append(host)
+        if host == "http://u1:9000":
+            slow_started.set()
+            await asyncio.sleep(0.3)
+        return httpx.Response(200, json={"completion": host})
+
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        slow = asyncio.create_task(pool.forward({"prompt": "p"}))
+        await slow_started.wait()
+        fast = [await pool.forward({"prompt": "p"}) for _ in range(6)]
+        await slow
+        await pool.aclose()
+        return fast
+
+    fast = asyncio.run(run())
+    assert hits[0] == "http://u1:9000"
+    assert "http://u1:9000" not in hits[1:]
+    assert {r[1]["completion"] for r in fast} == {"http://u2:9000", "http://u3:9000"}
+
+
+def test_slow_backend_is_avoided_after_it_completes():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = _host(request)
+        hits.append(host)
+        if host == "http://u2:9000":
+            await asyncio.sleep(0.2)
+        return httpx.Response(200, json={"completion": "ok"})
+
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        for _ in range(9):
+            await pool.forward({"prompt": "p"})
+        await pool.aclose()
+
+    asyncio.run(run())
+    assert hits[:3] == urls
+    assert "http://u2:9000" not in hits[3:]
+    assert set(hits[3:]) == {"http://u1:9000", "http://u3:9000"}
+
+
+def test_in_flight_returns_to_zero_after_errors():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "u1":
+            raise httpx.ConnectError("boom", request=request)
+        return httpx.Response(503, json={"detail": "overloaded"})
+
+    urls = ["http://u1:9000", "http://u2:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        results = await asyncio.gather(
+            *(pool.forward({"prompt": "p"}) for _ in range(6)), return_exceptions=True
+        )
+        await pool.aclose()
+        return results
+
+    results = asyncio.run(run())
+    assert any(isinstance(r, httpx.ConnectError) for r in results)
+    assert (503, {"detail": "overloaded"}) in results
+    assert [b.in_flight for b in pool._backends] == [0, 0]
