@@ -16,11 +16,11 @@ class UpstreamPool:
                  transport: httpx.AsyncBaseTransport | None = None,
                  timeout_s: float | None = None,
                  max_retries: int | None = None):
-        urls = urls or upstream_urls()
-        self._urls = cycle(urls)
+        self._urls = list(urls or upstream_urls())
+        self._starts = cycle(range(len(self._urls)))
         self._timeout_s = timeout_s if timeout_s is not None else upstream_timeout_s()
         self._max_retries = (max_retries if max_retries is not None
-                             else upstream_max_retries(len(urls)))
+                             else upstream_max_retries(len(self._urls)))
         connect_s = min(upstream_connect_timeout_s(), self._timeout_s)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._timeout_s, connect=connect_s), transport=transport
@@ -36,8 +36,11 @@ class UpstreamPool:
 
     async def forward(self, payload: dict) -> tuple[int, dict]:
         last_failure = "unavailable"
-        for _ in range(self._max_retries + 1):
-            url = next(self._urls)
+        # One shared round-robin step picks the start; retries walk on from the
+        # upstream that just failed, independent of concurrent requests.
+        start = next(self._starts)
+        for k in range(self._max_retries + 1):
+            url = self._urls[(start + k) % len(self._urls)]
             try:
                 status, body = await self._attempt(url, payload)
             except (httpx.TimeoutException, TimeoutError):

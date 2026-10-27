@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 import httpx
@@ -71,6 +72,30 @@ def test_all_5xx_return_502_with_explicit_max_retries():
     assert status == 502
     assert "HTTP 503" in body["detail"]
     assert hits == URLS[:2]
+
+
+def test_retries_walk_from_own_start_despite_concurrent_requests():
+    hits: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append((json.loads(request.content)["prompt"], _host(request)))
+        await asyncio.sleep(0.005)  # let the other requests advance the shared rotation
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    pool = UpstreamPool(urls=URLS, transport=httpx.MockTransport(handler), timeout_s=TIMEOUT_S)
+
+    async def run():
+        try:
+            return await asyncio.gather(*(pool.forward({"prompt": str(i)}) for i in range(3)))
+        finally:
+            await pool.aclose()
+
+    results = asyncio.run(run())
+    assert [status for status, _ in results] == [504] * 3
+    assert [p for p, _ in hits[:3]] == ["0", "1", "2"]  # attempts really interleave
+    for i in range(3):
+        mine = [url for p, url in hits if p == str(i)]
+        assert mine == [URLS[(i + k) % len(URLS)] for k in range(len(URLS) + 1)]
 
 
 def test_last_failure_decides_status():
