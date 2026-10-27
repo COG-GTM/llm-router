@@ -12,7 +12,7 @@ from .routes.conversations import router as conversations_router
 from .routes.info import router as info_router
 from .schemas import GenerateRequest
 from .store import Store
-from .upstream import UpstreamPool
+from .upstream import NoHealthyUpstream, UpstreamPool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
@@ -28,6 +28,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(RequestLogMiddleware)
+
+
+@app.exception_handler(NoHealthyUpstream)
+async def no_healthy_upstream(request, exc: NoHealthyUpstream):
+    return JSONResponse(status_code=503, content={"detail": "no healthy upstream"})
 
 
 @app.post("/v1/generate")
