@@ -9,7 +9,10 @@ from .config import (
     cb_cooldown_s,
     cb_failure_threshold,
     cb_max_cooldown_s,
+    upstream_connect_timeout_s,
+    upstream_max_retries,
     upstream_slow_s,
+    upstream_timeout_s,
     upstream_urls,
 )
 
@@ -37,10 +40,18 @@ class UpstreamPool:
                  failure_threshold: int | None = None,
                  cooldown_s: float | None = None,
                  max_cooldown_s: float | None = None,
-                 probe_interval_s: float = 1.0):
+                 probe_interval_s: float = 1.0,
+                 timeout_s: float | None = None,
+                 max_retries: int | None = None):
         self.backends = [Backend(u) for u in (urls or upstream_urls())]
         self._next = 0
-        self._client = httpx.AsyncClient(timeout=None, transport=transport)
+        self._timeout_s = timeout_s if timeout_s is not None else upstream_timeout_s()
+        self._max_retries = (max_retries if max_retries is not None
+                             else upstream_max_retries(len(self.backends)))
+        connect_s = min(upstream_connect_timeout_s(), self._timeout_s)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(self._timeout_s, connect=connect_s), transport=transport
+        )
         self._clock = clock
         self._slow_s = slow_s or upstream_slow_s()
         self._threshold = failure_threshold or cb_failure_threshold()
@@ -57,6 +68,16 @@ class UpstreamPool:
                 self._next = (self._next + i + 1) % n
                 return backend
         raise NoHealthyUpstream("all upstream circuits are open")
+
+    def _retry_pick(self, failed: Backend, tried: set[int]) -> Backend | None:
+        # Walk on from the backend that just failed, skipping open circuits;
+        # prefer backends this request hasn't tried yet.
+        n = len(self.backends)
+        i = self.backends.index(failed)
+        ring = [self.backends[(i + k) % n] for k in range(1, n + 1)]
+        healthy = [b for b in ring if b.state != OPEN]
+        fresh = [b for b in healthy if id(b) not in tried]
+        return (fresh or healthy or [None])[0]
 
     def _trip(self, backend: Backend) -> None:
         cooldown = min(self._cooldown_s * 2 ** min(backend.trips, 30), self._max_cooldown_s)
@@ -106,9 +127,7 @@ class UpstreamPool:
         else:
             self._trip(backend)
 
-    async def forward(self, payload: dict) -> tuple[int, dict]:
-        self._ensure_probe()
-        backend = self._pick()
+    async def _attempt(self, backend: Backend, payload: dict) -> tuple[int, dict | None]:
         slow = False
 
         def on_slow() -> None:
@@ -118,20 +137,47 @@ class UpstreamPool:
 
         watchdog = asyncio.get_running_loop().call_later(self._slow_s, on_slow)
         try:
-            resp = await self._client.post(f"{backend.url}/v1/completions", json=payload)
-        except httpx.RequestError:
-            watchdog.cancel()
+            # httpx timeouts are per phase/chunk; bound the whole attempt as well.
+            async with asyncio.timeout(self._timeout_s):
+                resp = await self._client.post(f"{backend.url}/v1/completions", json=payload)
+        except (httpx.RequestError, TimeoutError):
             if not slow:
                 self._record_failure(backend)
             raise
         finally:
             watchdog.cancel()
-        if not slow:
-            if resp.status_code >= 500:
+        if resp.status_code >= 500:
+            if not slow:
                 self._record_failure(backend)
-            else:
-                self._record_success(backend)
+            return resp.status_code, None
+        if not slow:
+            self._record_success(backend)
         return resp.status_code, resp.json()
+
+    async def forward(self, payload: dict) -> tuple[int, dict]:
+        self._ensure_probe()
+        backend: Backend | None = self._pick()
+        tried: set[int] = set()
+        last_failure = "unavailable"
+        for _ in range(self._max_retries + 1):
+            if backend is None:
+                break
+            tried.add(id(backend))
+            try:
+                status, body = await self._attempt(backend, payload)
+            except (httpx.TimeoutException, TimeoutError):
+                last_failure = "timeout"
+            except httpx.RequestError:
+                last_failure = "unavailable"
+            else:
+                if status < 500:
+                    return status, body
+                last_failure = f"HTTP {status}"
+            backend = self._retry_pick(backend, tried)
+        attempts = len(tried)
+        if last_failure == "timeout":
+            return 504, {"detail": f"upstream timed out after {attempts} attempts"}
+        return 502, {"detail": f"upstream failed after {attempts} attempts ({last_failure})"}
 
     async def aclose(self) -> None:
         if self._probe_task is not None:

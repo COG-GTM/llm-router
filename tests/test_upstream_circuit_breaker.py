@@ -118,8 +118,10 @@ def test_all_backends_open_raises_promptly():
     pool = _pool(hits, dict.fromkeys(URLS, "500"))
 
     async def run():
-        await _send(pool, 9)
-        assert all(b.state == OPEN for b in pool.backends)
+        # Retries spend several failed attempts per request, so the circuits
+        # open within a couple of requests instead of nine.
+        while not all(b.state == OPEN for b in pool.backends):
+            await pool.forward({"prompt": "p"})
         start = time.monotonic()
         with pytest.raises(NoHealthyUpstream):
             await pool.forward({"prompt": "p"})
@@ -134,7 +136,7 @@ def test_routes_return_503_when_no_healthy_upstream():
         main.app.state.pool = UpstreamPool(
             urls=URLS[:1], transport=_transport([], {URLS[0]: "500"}), failure_threshold=1,
             probe_interval_s=3600)
-        assert c.post("/v1/generate", json={"prompt": "hi"}).status_code == 500
+        assert c.post("/v1/generate", json={"prompt": "hi"}).status_code == 502
         r = c.post("/v1/generate", json={"prompt": "hi"})
         assert r.status_code == 503
         assert r.json() == {"detail": "no healthy upstream"}
