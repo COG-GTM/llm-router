@@ -1,3 +1,4 @@
+import math
 import os
 
 _DEFAULT = "http://localhost:9001,http://localhost:9002,http://localhost:9003"
@@ -13,7 +14,7 @@ def _env_number(name: str, default, cast):
         value = cast(os.environ.get(name, default))
     except ValueError:
         return default
-    return value if value > 0 else default
+    return value if value > 0 and math.isfinite(value) else default
 
 
 def upstream_attempt_timeout() -> float:

@@ -5,7 +5,7 @@ import time
 
 import httpx
 
-from app.config import upstream_urls
+from app.config import upstream_attempt_timeout, upstream_timeout, upstream_urls
 from app.upstream import UpstreamPool
 
 
@@ -236,3 +236,31 @@ def test_prefers_faster_replicas_over_a_consistently_slow_one():
     assert hits.count("http://u3:9000") == 1
     assert hits[-6:].count("http://u1:9000") == 3
     assert hits[-6:].count("http://u2:9000") == 3
+
+
+def test_non_json_5xx_is_retried_on_another_replica():
+    hits: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(_replica(request))
+        if len(hits) == 1:
+            return httpx.Response(502, text="<html>bad gateway</html>")
+        return httpx.Response(200, json={"completion": "ok"})
+
+    urls = ["http://u1:9000", "http://u2:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        result = await pool.forward({"prompt": "p", "max_tokens": 64})
+        await pool.aclose()
+        return result
+
+    assert asyncio.run(run()) == (200, {"completion": "ok"})
+    assert hits == urls
+
+
+def test_non_finite_timeout_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_ATTEMPT_TIMEOUT_S", "inf")
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_S", "nan")
+    assert upstream_attempt_timeout() == 0.25
+    assert upstream_timeout() == 10.0

@@ -59,7 +59,6 @@ class UpstreamPool:
             try:
                 async with asyncio.timeout(timeout):
                     resp = await self._client.post(f"{url}/v1/completions", json=payload)
-                status, body = resp.status_code, resp.json()
             except (TimeoutError, httpx.TimeoutException):
                 self._record_failure(url, start)
                 result = (504, {"detail": "upstream timeout"})
@@ -67,6 +66,14 @@ class UpstreamPool:
             except httpx.TransportError:
                 self._record_failure(url, start)
                 result = (502, {"detail": "upstream unavailable"})
+                continue
+            status = resp.status_code
+            try:
+                body = resp.json()
+            except ValueError:
+                self._record_failure(url, start)
+                result = (status if status >= 500 else 502,
+                          {"detail": "invalid upstream response"})
                 continue
             if status >= 500:
                 self._record_failure(url, start)
