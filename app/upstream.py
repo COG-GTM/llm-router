@@ -10,14 +10,14 @@ class UpstreamPool:
                  transport: httpx.AsyncBaseTransport | None = None,
                  timeout: float | None = None):
         self._urls_list = list(urls or upstream_urls())
-        self._urls = cycle(self._urls_list)
+        self._starts = cycle(range(len(self._urls_list)))
         self._client = httpx.AsyncClient(timeout=timeout or upstream_timeout(),
                                          transport=transport)
 
     async def forward(self, payload: dict) -> tuple[int, dict]:
         last_5xx: httpx.Response | None = None
-        for _ in range(len(self._urls_list)):
-            url = next(self._urls)
+        start = next(self._starts)
+        for url in self._urls_list[start:] + self._urls_list[:start]:
             try:
                 resp = await self._client.post(f"{url}/v1/completions", json=payload)
             except (httpx.TransportError, httpx.TimeoutException):

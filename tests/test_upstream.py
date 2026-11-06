@@ -147,3 +147,27 @@ def test_failover_keeps_round_robin_rotation():
     results = asyncio.run(run())
     assert [b["completion"] for _, b in results] == ["u1", "u3"]
     assert hits == ["u1", "u2", "u3"]
+
+
+def test_concurrent_failover_tries_each_replica_once():
+    seen: dict[str, list[str]] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        rid = request.read().decode()
+        seen.setdefault(rid, []).append(request.url.host)
+        await asyncio.sleep(0)
+        if request.url.host != "u3":
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"completion": "u3"})
+
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls, transport=httpx.MockTransport(handler))
+
+    async def run():
+        results = await asyncio.gather(*(pool.forward({"id": i}) for i in range(9)))
+        await pool.aclose()
+        return results
+
+    results = asyncio.run(run())
+    assert all(r == (200, {"completion": "u3"}) for r in results)
+    assert all(sorted(set(h)) == sorted(h) for h in seen.values())
