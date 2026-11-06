@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 
-from app.config import upstream_urls
+from app.config import upstream_timeout, upstream_urls
 from app.upstream import UpstreamPool
 
 
@@ -41,3 +41,109 @@ def test_round_robin_and_passthrough():
     results = asyncio.run(run())
     assert hits == ["http://u1:9000", "http://u2:9000", "http://u3:9000", "http://u1:9000"]
     assert all(r == (200, {"completion": "ok"}) for r in results)
+
+
+def test_upstream_timeout_default(monkeypatch):
+    monkeypatch.delenv("UPSTREAM_TIMEOUT_S", raising=False)
+    assert upstream_timeout() == 0.4
+
+
+def test_upstream_timeout_env(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_S", "1.25")
+    assert upstream_timeout() == 1.25
+
+
+def test_client_uses_configured_timeout(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_S", "0.3")
+    pool = UpstreamPool(urls=["http://u1:9000"], transport=_recording_transport([]))
+    assert pool._client.timeout == httpx.Timeout(0.3)
+    explicit = UpstreamPool(urls=["http://u1:9000"], transport=_recording_transport([]),
+                            timeout=2.0)
+    assert explicit._client.timeout == httpx.Timeout(2.0)
+    asyncio.run(pool.aclose())
+    asyncio.run(explicit.aclose())
+
+
+def _scripted_transport(behaviour: dict, hits: list[str]) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        hits.append(host)
+        action = behaviour.get(host, 200)
+        if action == "connect_error":
+            raise httpx.ConnectError("refused", request=request)
+        if action == "timeout":
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(action, json={"completion": host, "status": action})
+
+    return httpx.MockTransport(handler)
+
+
+def _forward_once(behaviour: dict, hits: list[str]):
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls, transport=_scripted_transport(behaviour, hits))
+
+    async def run():
+        try:
+            return await pool.forward({"prompt": "p"})
+        finally:
+            await pool.aclose()
+
+    return asyncio.run(run())
+
+
+def test_failover_on_transport_error():
+    hits: list[str] = []
+    status, body = _forward_once({"u1": "connect_error"}, hits)
+    assert (status, body["completion"]) == (200, "u2")
+    assert hits == ["u1", "u2"]
+
+
+def test_failover_on_timeout():
+    hits: list[str] = []
+    status, body = _forward_once({"u1": "timeout", "u2": "timeout"}, hits)
+    assert (status, body["completion"]) == (200, "u3")
+    assert hits == ["u1", "u2", "u3"]
+
+
+def test_failover_on_5xx():
+    hits: list[str] = []
+    status, body = _forward_once({"u1": 503}, hits)
+    assert (status, body["completion"]) == (200, "u2")
+    assert hits == ["u1", "u2"]
+
+
+def test_4xx_returned_without_retry():
+    hits: list[str] = []
+    status, body = _forward_once({"u1": 422}, hits)
+    assert status == 422
+    assert hits == ["u1"]
+
+
+def test_all_transport_errors_returns_502():
+    hits: list[str] = []
+    behaviour = {"u1": "connect_error", "u2": "timeout", "u3": "connect_error"}
+    assert _forward_once(behaviour, hits) == (502, {"error": "all upstreams unavailable"})
+    assert hits == ["u1", "u2", "u3"]
+
+
+def test_all_5xx_returns_last_upstream_error():
+    hits: list[str] = []
+    status, body = _forward_once({"u1": 500, "u2": 502, "u3": 503}, hits)
+    assert (status, body["completion"]) == (503, "u3")
+    assert hits == ["u1", "u2", "u3"]
+
+
+def test_failover_keeps_round_robin_rotation():
+    hits: list[str] = []
+    urls = ["http://u1:9000", "http://u2:9000", "http://u3:9000"]
+    pool = UpstreamPool(urls=urls,
+                        transport=_scripted_transport({"u2": "connect_error"}, hits))
+
+    async def run():
+        results = [await pool.forward({"prompt": "p"}) for _ in range(2)]
+        await pool.aclose()
+        return results
+
+    results = asyncio.run(run())
+    assert [b["completion"] for _, b in results] == ["u1", "u3"]
+    assert hits == ["u1", "u2", "u3"]
