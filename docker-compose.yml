@@ -3,17 +3,20 @@ services:
     image: ghcr.io/abboudp/llm-service:latest
     environment:
       REPLICA_ID: "1"
+      DEGRADED_MS: "0"
     ports:
       - "9001:9000"
   llm-service-2:
     image: ghcr.io/abboudp/llm-service:latest
     environment:
       REPLICA_ID: "2"
+      DEGRADED_MS: "0"
     ports:
       - "9002:9000"
   llm-service-3:
     image: ghcr.io/abboudp/llm-service:latest
     environment:
       REPLICA_ID: "3"
+      DEGRADED_MS: "0"
     ports:
       - "9003:9000"
