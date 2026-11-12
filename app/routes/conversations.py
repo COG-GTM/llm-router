@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from ..export import render_markdown, slugify
 from ..schemas import ConversationCreate, ConversationOut, ConversationUpdate, MessageOut
@@ -18,19 +19,20 @@ async def list_conversations(
         description="Case-insensitive substring filter on conversation title.",
     ),
 ):
-    return request.app.state.store.list_conversations(q=q)
+    return await run_in_threadpool(request.app.state.store.list_conversations, q=q)
 
 
 @router.post("", status_code=201, response_model=ConversationOut)
 async def create_conversation(body: ConversationCreate, request: Request):
     title = body.title or "New conversation"
-    return request.app.state.store.create_conversation(title=title)
+    return await run_in_threadpool(request.app.state.store.create_conversation, title=title)
 
 
 @router.patch("/{conversation_id}", response_model=ConversationOut)
 async def update_conversation(conversation_id: str, body: ConversationUpdate, request: Request):
-    conversation = request.app.state.store.update_conversation(
-        conversation_id, title=body.title, pinned=body.pinned
+    conversation = await run_in_threadpool(
+        request.app.state.store.update_conversation,
+        conversation_id, title=body.title, pinned=body.pinned,
     )
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
@@ -39,7 +41,7 @@ async def update_conversation(conversation_id: str, body: ConversationUpdate, re
 
 @router.delete("/{conversation_id}", status_code=204)
 async def delete_conversation(conversation_id: str, request: Request):
-    if not request.app.state.store.delete_conversation(conversation_id):
+    if not await run_in_threadpool(request.app.state.store.delete_conversation, conversation_id):
         raise HTTPException(status_code=404, detail="conversation not found")
     return Response(status_code=204)
 
@@ -60,18 +62,18 @@ async def list_messages(
     ),
 ):
     store = request.app.state.store
-    if store.get_conversation(conversation_id) is None:
+    if await run_in_threadpool(store.get_conversation, conversation_id) is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    return store.list_messages(conversation_id, limit=limit, before=before)
+    return await run_in_threadpool(store.list_messages, conversation_id, limit=limit, before=before)
 
 
 @router.get("/{conversation_id}/export")
 async def export_conversation(conversation_id: str, request: Request):
     store = request.app.state.store
-    conversation = store.get_conversation(conversation_id)
+    conversation = await run_in_threadpool(store.get_conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    messages = store.list_messages(conversation_id)
+    messages = await run_in_threadpool(store.list_messages, conversation_id)
     body = render_markdown(conversation, messages)
     filename = f"{slugify(conversation['title'])}.md"
     return Response(

@@ -229,3 +229,14 @@ def test_store_migrates_a_pre_existing_database_missing_the_pinned_column(tmp_pa
     assert updated["pinned"] is True
     assert s.get_conversation("legacy-1")["pinned"] is True
     s.close()
+
+
+def test_store_is_safe_under_concurrent_threads(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    s = Store(str(tmp_path / "concurrent.db"))
+    cid = s.create_conversation()["id"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda n: s.add_message(cid, "user", f"m{n}"), range(200)))
+    assert len(s.list_messages(cid)) == 200
+    s.close()

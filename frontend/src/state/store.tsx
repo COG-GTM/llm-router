@@ -167,7 +167,9 @@ export function buildValue(
       try {
         const resp = await api.sendChat({ conversation_id: state.selectedId, message: text });
         dispatch({ type: "send_succeeded", message: resp.message, usage: resp.usage });
-        await refresh(); // titles/order may have changed
+        // Titles/order may have changed, but the reply is already on screen:
+        // refresh the sidebar in the background instead of holding up send.
+        void refresh().catch(() => {});
       } catch (err) {
         dispatch({ type: "send_failed", error: (err as Error).message, userText: text });
       }

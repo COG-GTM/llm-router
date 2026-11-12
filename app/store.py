@@ -1,6 +1,8 @@
 """SQLite persistence for conversations and messages."""
 import os
+import functools
 import sqlite3
+import threading
 import time
 import uuid
 
@@ -35,8 +37,22 @@ def _conversation_dict(row: sqlite3.Row) -> dict:
     return conversation
 
 
+def _locked(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Store:
+    """Thread-safe: async handlers call these methods from a threadpool so
+    SQLite I/O doesn't block the event loop. One shared connection is used,
+    so every public method holds `_lock` to keep statements and commits from
+    different threads from interleaving."""
+
     def __init__(self, path: str):
+        self._lock = threading.RLock()
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -66,6 +82,7 @@ class Store:
 
     # -- conversations -----------------------------------------------------
 
+    @_locked
     def create_conversation(self, title: str = "New conversation") -> dict:
         now = time.time()
         conversation = {
@@ -83,6 +100,7 @@ class Store:
         self._conn.commit()
         return conversation
 
+    @_locked
     def list_conversations(self, q: str | None = None) -> list[dict]:
         # Pinned conversations always float to the top; within each group,
         # most-recently-updated first.
@@ -101,12 +119,14 @@ class Store:
             rows = self._conn.execute("SELECT * FROM conversations" + order_by).fetchall()
         return [_conversation_dict(r) for r in rows]
 
+    @_locked
     def get_conversation(self, conversation_id: str) -> dict | None:
         row = self._conn.execute(
             "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
         ).fetchone()
         return _conversation_dict(row) if row else None
 
+    @_locked
     def update_conversation(self, conversation_id: str, title: str | None = None,
                             pinned: bool | None = None) -> dict | None:
         """Partially update a conversation's title and/or pinned flag.
@@ -139,6 +159,7 @@ class Store:
             return None
         return self.get_conversation(conversation_id)
 
+    @_locked
     def delete_conversation(self, conversation_id: str) -> bool:
         cur = self._conn.execute(
             "DELETE FROM conversations WHERE id = ?", (conversation_id,)
@@ -148,6 +169,7 @@ class Store:
 
     # -- messages ----------------------------------------------------------
 
+    @_locked
     def add_message(self, conversation_id: str, role: str, content: str,
                     latency_ms: int | None = None) -> dict:
         now = time.time()
@@ -171,6 +193,7 @@ class Store:
         self._conn.commit()
         return message
 
+    @_locked
     def list_messages(self, conversation_id: str, limit: int | None = None,
                       before: str | None = None) -> list[dict]:
         """List a conversation's messages in chronological order.
@@ -203,5 +226,6 @@ class Store:
         rows = self._conn.execute(query, params).fetchall()
         return [_row_to_dict(r, drop=("rowid",)) for r in reversed(rows)]
 
+    @_locked
     def close(self) -> None:
         self._conn.close()

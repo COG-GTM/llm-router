@@ -119,3 +119,46 @@ describe("buildValue: retryLast()", () => {
     );
   });
 });
+
+describe("buildValue: send()", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("resolves once the reply lands, without waiting on the sidebar refresh", async () => {
+    const reply = message({ id: "m2", role: "assistant", content: "reply" });
+    vi.mocked(api.sendChat).mockResolvedValue({
+      message: reply,
+      latency_ms: 5,
+      model: null,
+      usage: null,
+    });
+    const slowRefresh = deferred<never[]>();
+    vi.mocked(api.listConversations).mockImplementation(() => slowRefresh.promise);
+
+    const dispatch = vi.fn();
+    const { actions } = buildValue(
+      { ...initialState, selectedId: "c1" },
+      dispatch,
+      { current: 0 },
+      { current: 0 },
+    );
+
+    await actions.send("hello");
+
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "send_succeeded", message: reply }),
+    );
+    expect(api.listConversations).toHaveBeenCalledTimes(1);
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "conversations_loaded" }),
+    );
+
+    slowRefresh.resolve([]);
+    await vi.waitFor(() =>
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "conversations_loaded", conversations: [] }),
+      ),
+    );
+  });
+});

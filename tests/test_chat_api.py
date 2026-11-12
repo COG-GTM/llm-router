@@ -91,3 +91,27 @@ def test_chat_upstream_error_passthrough_and_no_persist():
     c.__exit__(None, None, None)
     assert resp.status_code == 503
     assert msgs == []  # failed exchanges are not persisted
+
+
+def test_chat_caps_history_sent_upstream():
+    from app.prompting import HISTORY_MAX_MESSAGES
+
+    pool = FakePool()
+    c = chat_client(pool)
+    cid = c.post("/v1/conversations", json={}).json()["id"]
+    store = main.app.state.store
+    total = HISTORY_MAX_MESSAGES + 20
+    for n in range(total):
+        store.add_message(cid, "user" if n % 2 == 0 else "assistant", f"turn-{n}")
+
+    c.post("/v1/chat", json={"conversation_id": cid, "message": "latest"})
+    title = [x for x in c.get("/v1/conversations").json() if x["id"] == cid][0]["title"]
+    c.__exit__(None, None, None)
+
+    prompt = pool.calls[0]["prompt"]
+    assert "turn-0\n" not in prompt
+    assert f"turn-{total - HISTORY_MAX_MESSAGES - 1}\n" not in prompt
+    assert f"turn-{total - HISTORY_MAX_MESSAGES}\n" in prompt
+    assert f"turn-{total - 1}\n" in prompt
+    assert prompt.endswith("User: latest\nAssistant:")
+    assert title == "New conversation"  # existing history: no auto-title
